@@ -1,0 +1,28 @@
+[package]
+name = "sentiric-proxy-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.11", features = ["tls", "tls-roots"] }
+prost = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+dotenvy = "0.15"
+anyhow = "1.0"
+thiserror = "1.0"
+# HTTP Server (Health Check)
+hyper = { version = "0.14.28", features = ["full"] } 
+# Konfigürasyon
+config = "0.14" 
+
+# SIP Trafik işleme için hafif SIP kütüphanesi yerine ham UDP socket kullanacağız,
+# ancak Rust'ın SIP mesajlarını ayrıştırmak için string operasyonları yeterli olacaktır.
+# SIP URI/IP işleme için ek araçlar:
+regex = "1"
+once_cell = "1.19"
+# --- KRİTİK BAĞIMLILIK ---
+[dependencies.sentiric-contracts]
+git = "https://github.com/sentiric/sentiric-contracts.git"
+tag = "v1.9.0"
