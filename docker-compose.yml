@@ -41,6 +41,10 @@ services:
       - PROXY_SERVICE_HOST=proxy-service
       - PROXY_SERVICE_SIP_PORT=13074
 
+      #
+      - REGISTRAR_SERVICE_TARGET_GRPC_URL=registrar-service:13061
+      - B2BUA_SERVICE_TARGET_GRPC_URL=b2bua-service:13081
+
       # --- Security
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - PROXY_SERVICE_CERT_PATH=/sentiric-certificates/certs/proxy-service-chain.crt
@@ -57,9 +61,9 @@ services:
       - "${PROXY_SERVICE_HTTP_PORT:-13070}:${PROXY_SERVICE_HTTP_PORT:-13070}"
       - "${PROXY_SERVICE_GRPC_PORT:-13071}:${PROXY_SERVICE_GRPC_PORT:-13071}"
       - "${PROXY_SERVICE_METRICS_PORT:-13072}:${PROXY_SERVICE_METRICS_PORT:-13072}"
-      # SIP UDP portu (Proxy/SBC dış dünyaya açılmaz, sadece içeride dinlenir)
-      # - "${PROXY_SERVICE_SIP_PORT:-13074}:${PROXY_SERVICE_SIP_PORT:-13074}/udp"
-      # - "${PROXY_SERVICE_SIP_PORT:-13074}:${PROXY_SERVICE_SIP_PORT:-13074}/tcp" 
+      
+      - "${PROXY_SERVICE_SIP_PORT:-13074}:${PROXY_SERVICE_SIP_PORT:-13074}/udp"
+      - "${PROXY_SERVICE_SIP_PORT:-13074}:${PROXY_SERVICE_SIP_PORT:-13074}/tcp" 
 
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "${PROXY_SERVICE_GRPC_PORT:-13071}" ]
