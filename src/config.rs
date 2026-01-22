@@ -31,7 +31,7 @@ impl AppConfig {
         // Proxy Harmonik Portlar: 1307X
         let grpc_port = env::var("PROXY_SERVICE_GRPC_PORT").unwrap_or_else(|_| "13071".to_string());
         let http_port = env::var("PROXY_SERVICE_HTTP_PORT").unwrap_or_else(|_| "13070".to_string());
-        let sip_port_str = env::var("PROXY_SERVICE_SIP_PORT").unwrap_or_else(|_| "5060".to_string());
+        let sip_port_str = env::var("PROXY_SERVICE_SIP_PORT").unwrap_or_else(|_| "13074".to_string());
         let sip_port = sip_port_str.parse::<u16>().context("Geçersiz SIP portu")?;
         
         let grpc_addr: SocketAddr = format!("[::]:{}", grpc_port).parse()?;

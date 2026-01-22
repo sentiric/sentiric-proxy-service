@@ -62,7 +62,7 @@ impl ProxyEngine {
         // Eğer bu başlığı görürsek, bu paketi tekrar B2BUA'ya göndermemeliyiz.
         // Bu bir "Outbound" (Dışa Giden) çağrıdır.
         let user_agent = utils::get_header(packet, HeaderName::UserAgent);
-        if user_agent.contains("Sentiric B2BUA") {
+        if user_agent.contains("Sentiric_B2BUA") {
             info!("🔄 Giden Çağrı Tespit Edildi (Outbound Traffic). Doğrudan yönlendiriliyor.");
             
             // Gerçek bir senaryoda burada paketi dış dünyaya (Operatöre) yönlendirmeliyiz.
