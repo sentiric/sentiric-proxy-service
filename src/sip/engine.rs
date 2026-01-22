@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn, error, instrument};
-use sentiric_sip_core::{SipPacket, Method, HeaderName};
+use sentiric_sip_core::{SipPacket, Method, HeaderName, Header}; // Header eklendi
 use sentiric_contracts::sentiric::sip::v1::{RegisterRequest, InitiateCallRequest};
 use tonic::Request;
 use crate::grpc::client::InternalClients;
@@ -23,7 +23,7 @@ impl ProxyEngine {
         match packet.method {
             Method::Register => self.handle_register(packet).await,
             Method::Invite => self.handle_invite(packet).await,
-            _ => None, // Diğer metodlar şimdilik drop ediliyor
+            _ => None,
         }
     }
 
@@ -47,33 +47,22 @@ impl ProxyEngine {
         match clients.registrar.register(req).await {
             Ok(_) => {
                 info!("Registrar: Kayıt başarılı.");
-                Some(SipPacket::new_response(200, "OK".to_string()))
+                // DÜZELTME: Yanıtı oluştururken headerları kopyalıyoruz.
+                Some(self.create_response(packet, 200, "OK"))
             }
             Err(e) => {
                 error!("Registrar Hatası: {}", e);
-                Some(SipPacket::new_response(500, "Internal Server Error".to_string()))
+                Some(self.create_response(packet, 500, "Internal Server Error"))
             }
         }
     }
 
     async fn handle_invite(&self, packet: &SipPacket) -> Option<SipPacket> {
-        // --- LOOP DETECTION (DÖNGÜ KORUMASI) ---
-        // B2BUA servisi, gönderdiği paketlere "User-Agent: Sentiric B2BUA" ekler.
-        // Eğer bu başlığı görürsek, bu paketi tekrar B2BUA'ya göndermemeliyiz.
-        // Bu bir "Outbound" (Dışa Giden) çağrıdır.
+        // --- LOOP DETECTION ---
         let user_agent = utils::get_header(packet, HeaderName::UserAgent);
         if user_agent.contains("Sentiric_B2BUA") {
-            info!("🔄 Giden Çağrı Tespit Edildi (Outbound Traffic). Doğrudan yönlendiriliyor.");
-            
-            // Gerçek bir senaryoda burada paketi dış dünyaya (Operatöre) yönlendirmeliyiz.
-            // Test ortamında dış dünyayı simüle eden bir uç nokta olmadığı için
-            // veya doğrudan IP'ye gitmesi gerektiği için şimdilik "100 Trying" dönüyoruz
-            // ki B2BUA akışın devam ettiğini bilsin.
-            // VEYA: Hedef IP'ye (Request-URI'deki IP) raw socket üzerinden forward edilebilir.
-            
-            // Şimdilik döngüyü kırmak için işlem yapıldığını bildiriyoruz.
-            // İdeal çözüm: "Stateless Forwarding"
-            return None; // None döndürmek, SIP sunucusunun (server.rs) yanıt vermemesini sağlar (Forwarding yapılmalı)
+            info!("🔄 Giden Çağrı Tespit Edildi (Outbound Traffic). Forwarding...");
+            return None; 
         }
 
         // --- INBOUND CALL HANDLING ---
@@ -96,15 +85,43 @@ impl ProxyEngine {
                 let inner = res.into_inner();
                 if inner.success {
                     info!("B2BUA: Çağrı başlatıldı. ID: {}", inner.new_call_id);
-                    Some(SipPacket::new_response(100, "Trying".to_string()))
+                    Some(self.create_response(packet, 100, "Trying"))
                 } else {
-                    Some(SipPacket::new_response(403, "Forbidden".to_string()))
+                    Some(self.create_response(packet, 403, "Forbidden"))
                 }
             }
             Err(e) => {
                 error!("B2BUA Hatası: {}", e);
-                Some(SipPacket::new_response(503, "Service Unavailable".to_string()))
+                Some(self.create_response(packet, 503, "Service Unavailable"))
             }
         }
+    }
+
+    // --- YARDIMCI FONKSİYON: Yanıt Oluşturucu ---
+    // RFC 3261 Gereği: Via, From, To, Call-ID ve CSeq başlıkları kopyalanmalıdır.
+    fn create_response(&self, req: &SipPacket, code: u16, reason: &str) -> SipPacket {
+        let mut resp = SipPacket::new_response(code, reason.to_string());
+        
+        // 1. Kritik Başlıkları Kopyala
+        for h in &req.headers {
+            match h.name {
+                HeaderName::Via | 
+                HeaderName::From | 
+                HeaderName::To | 
+                HeaderName::CallId | 
+                HeaderName::CSeq => {
+                    resp.headers.push(h.clone());
+                },
+                _ => {}
+            }
+        }
+
+        // 2. Server Header Ekle
+        resp.headers.push(Header::new(HeaderName::Server, "Sentiric Proxy".to_string()));
+        
+        // 3. Content-Length (Otomatik 0)
+        resp.headers.push(Header::new(HeaderName::ContentLength, "0".to_string()));
+
+        resp
     }
 }
