@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, warn, error, instrument};
+use tracing::{info, error, instrument};
 use sentiric_sip_core::{SipPacket, Method, HeaderName, Header}; 
 use sentiric_contracts::sentiric::sip::v1::RegisterRequest;
 use tonic::Request;
@@ -26,12 +26,13 @@ impl ProxyEngine {
         match packet.method {
             Method::Register => {
                 if let Some(resp) = self.handle_register(packet).await {
-                    return Some((resp, None)); // Yanıtı gönderene (SBC) geri dön
+                    return Some((resp, None));
                 }
                 None
             },
             Method::Invite => self.handle_invite(packet).await,
-            _ => None,
+            // Diğer metodlar (ACK, BYE vb.) için passthrough logic eklenmeli
+            _ => self.handle_passthrough(packet).await, 
         }
     }
 
@@ -42,7 +43,7 @@ impl ProxyEngine {
         let aor = utils::extract_aor(&to_header); 
         let contact_uri = utils::extract_aor(&contact); 
 
-        info!("REGISTER Process: AOR={}, Contact={}", aor, contact_uri);
+        info!("REGISTER Process: AOR='{}', Contact='{}'", aor, contact_uri);
 
         let mut clients = self.clients.lock().await;
         
@@ -65,19 +66,29 @@ impl ProxyEngine {
     }
 
     async fn handle_invite(&self, packet: &SipPacket) -> Option<(SipPacket, Option<std::net::SocketAddr>)> {
-        // --- LOOP DETECTION ---
+        // --- OUTBOUND TRAFFIC (B2BUA -> User) ---
         let user_agent = utils::get_header(packet, HeaderName::UserAgent);
-        if user_agent.contains("Sentiric_B2BUA") {
-            info!("🔄 Giden Çağrı (Outbound Traffic). Passthrough...");
-            return None; 
+        if user_agent.contains("Sentiric B2BUA") {
+            // B2BUA'dan geliyor, hedef kullanıcıya (Leg B) gitmeli.
+            // Hedef adres, paketin Request-URI (ilk satır) kısmındadır.
+            // Örn: INVITE sip:1001@192.168.1.50:5060 SIP/2.0
+            
+            // Basit bir parsing ile hedef IP:Port'u buluyoruz.
+            if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
+                info!("🔄 Outbound INVITE Routing: B2BUA -> {}", target_addr);
+                return Some((packet.clone(), Some(target_addr)));
+            } else {
+                error!("❌ Outbound INVITE hedef adresi çözülemedi: {}", packet.uri);
+                return None;
+            }
         }
 
+        // --- INBOUND TRAFFIC (User -> B2BUA) ---
         let from = utils::get_header(packet, HeaderName::From);
         let to = utils::get_header(packet, HeaderName::To);
         
-        info!("INVITE Forwarding -> B2BUA (SIP): From={}, To={}", from, to);
+        info!("➡️ Inbound INVITE Routing: User -> B2BUA: From={}, To={}", from, to);
 
-        // B2BUA SIP Adresini Çözümle
         let b2bua_target = match lookup_host(&self.config.b2bua_sip_addr).await {
             Ok(mut addrs) => addrs.next(),
             Err(e) => {
@@ -87,26 +98,41 @@ impl ProxyEngine {
         };
 
         if let Some(target) = b2bua_target {
-            // Paketi olduğu gibi B2BUA'ya ilet (Transparent Proxy)
-            // Not: Geri dönüş değerinde (Packet, Target) döndürüyoruz.
-            // Target varsa, o adrese forward eder. Target None ise, kaynağa yanıt döner.
             return Some((packet.clone(), Some(target)));
         }
 
         Some((self.create_response(packet, 503, "Service Unavailable"), None))
     }
 
-    // --- YARDIMCI FONKSİYON: Yanıt Oluşturucu ---
+    // ACK, BYE gibi diğer paketler için genel yönlendirme
+    async fn handle_passthrough(&self, packet: &SipPacket) -> Option<(SipPacket, Option<std::net::SocketAddr>)> {
+        // Eğer B2BUA'dan geliyorsa -> User'a
+        // Eğer User'dan geliyorsa -> B2BUA'ya
+        // Bu ayrımı yapmak için yine User-Agent veya Via başlıklarına bakılabilir.
+        // Basitlik için şimdilik User -> B2BUA varsayıyoruz (Inbound ağırlıklı).
+        // Gerçek implementasyonda stateful proxy logic gerekir.
+        
+        let user_agent = utils::get_header(packet, HeaderName::UserAgent);
+        if user_agent.contains("Sentiric B2BUA") {
+             if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
+                 return Some((packet.clone(), Some(target_addr)));
+             }
+        } else {
+             // User -> B2BUA
+             if let Ok(mut addrs) = lookup_host(&self.config.b2bua_sip_addr).await {
+                 if let Some(target) = addrs.next() {
+                     return Some((packet.clone(), Some(target)));
+                 }
+             }
+        }
+        None
+    }
+
     fn create_response(&self, req: &SipPacket, code: u16, reason: &str) -> SipPacket {
         let mut resp = SipPacket::new_response(code, reason.to_string());
-        
         for h in &req.headers {
             match h.name {
-                HeaderName::Via | 
-                HeaderName::From | 
-                HeaderName::To | 
-                HeaderName::CallId | 
-                HeaderName::CSeq => {
+                HeaderName::Via | HeaderName::From | HeaderName::To | HeaderName::CallId | HeaderName::CSeq => {
                     resp.headers.push(h.clone());
                 },
                 _ => {}
@@ -115,5 +141,27 @@ impl ProxyEngine {
         resp.headers.push(Header::new(HeaderName::Server, "Sentiric Proxy".to_string()));
         resp.headers.push(Header::new(HeaderName::ContentLength, "0".to_string()));
         resp
+    }
+
+    // URI stringinden (sip:ip:port) SocketAddr üretir
+    fn extract_target_addr(&self, uri: &str) -> Option<std::net::SocketAddr> {
+        // sip:user@192.168.1.5:5060 -> 192.168.1.5:5060
+        // sip:192.168.1.5:5060 -> 192.168.1.5:5060
+        
+        let clean = uri.trim_start_matches("sip:");
+        let host_port_part = if let Some(at_idx) = clean.find('@') {
+            &clean[at_idx+1..]
+        } else {
+            clean
+        };
+
+        // Parametreleri at (;transport=udp gibi)
+        let host_port = if let Some(semi_idx) = host_port_part.find(';') {
+            &host_port_part[..semi_idx]
+        } else {
+            host_port_part
+        };
+
+        host_port.parse().ok()
     }
 }

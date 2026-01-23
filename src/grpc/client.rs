@@ -6,7 +6,7 @@ use sentiric_contracts::sentiric::sip::v1::registrar_service_client::RegistrarSe
 use sentiric_contracts::sentiric::sip::v1::b2bua_service_client::B2buaServiceClient;
 use tonic::transport::{Channel, ClientTlsConfig, Certificate, Identity};
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{info};
 
 pub struct InternalClients {
     pub registrar: RegistrarServiceClient<Channel>,
