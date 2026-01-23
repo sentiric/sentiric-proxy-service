@@ -1273,8 +1273,8 @@ dependencies = [
 
 [[package]]
 name = "sentiric-sip-core"
-version = "1.2.2"
-source = "git+https://github.com/sentiric/sentiric-sip-core.git?tag=v1.2.2#a33d1d7a4a926ba24647b9b54d51b4f83d6ffe74"
+version = "1.2.3"
+source = "git+https://github.com/sentiric/sentiric-sip-core.git?tag=v1.2.3#cff3e4aa07e6ea21508021be25b607bcdb341ac0"
 dependencies = [
  "once_cell",
  "regex",
