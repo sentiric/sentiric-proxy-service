@@ -106,8 +106,8 @@ impl App {
         
         tokio::select! {
             res = grpc_server_handle => { if let Err(e) = res? { error!("gRPC Error: {}", e); } },
-            res = sip_handle => { error!("SIP Server durdu"); },
-            res = http_server_handle => { error!("HTTP Server durdu"); },
+            _res = sip_handle => { error!("SIP Server durdu"); },   // DÜZELTME: _res
+            _res = http_server_handle => { error!("HTTP Server durdu"); }, // DÜZELTME: _res
             _ = ctrl_c => { warn!("Kapatma sinyali alındı."); },
         }
 

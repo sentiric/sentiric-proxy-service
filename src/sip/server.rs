@@ -45,9 +45,9 @@ impl SipServer {
                             let data = &buf[..len];
                             
                             match parser::parse(data) {
-                                Ok(packet) => {
+                                Ok(mut packet) => { // DÜZELTME: packet mutable yapıldı
                                     // Process
-                                    if let Some((resp_packet, target_addr)) = self.engine.process_packet(&packet).await {
+                                    if let Some((resp_packet, target_addr)) = self.engine.process_packet(&mut packet, src_addr).await {
                                         let dest = target_addr.unwrap_or(src_addr);
                                         let resp_bytes = resp_packet.to_bytes();
                                         
@@ -57,7 +57,9 @@ impl SipServer {
                                     }
                                 },
                                 Err(e) => {
-                                    warn!("Malformed SIP packet from {}: {}", src_addr, e);
+                                    if len > 4 { 
+                                        warn!("Malformed SIP packet from {}: {}", src_addr, e);
+                                    }
                                 }
                             }
                         },

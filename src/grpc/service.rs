@@ -18,7 +18,7 @@ impl ProxyService for MyProxyService {
         request: Request<GetNextHopRequest>,
     ) -> Result<Response<GetNextHopResponse>, Status> {
         info!("GetNextHop RPC isteği alındı. SIP mesajı analiz ediliyor...");
-        let req = request.into_inner(); // req değişkeni artık kullanılıyor
+        let _req = request.into_inner(); // DÜZELTME: req -> _req (Henüz kullanılmıyor)
         
         // Basit bir placeholder yönlendirme mantığı: Her şeyi B2BUA'ya gönder.
         let next_hop = GetNextHopResponse {
