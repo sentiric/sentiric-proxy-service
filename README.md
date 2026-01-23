@@ -1,19 +1,21 @@
 # 🛡️ Sentiric Proxy Service
 
-[![Status](https://img.shields.io/badge/status-vision-lightgrey.svg)]()
+[![Status](https://img.shields.io/badge/status-active-success.svg)]()
 [![Language](https://img.shields.io/badge/language-Rust-orange.svg)]()
 [![Protocol](https://img.shields.io/badge/protocol-gRPC_&_UDP-green.svg)]()
 
-**Sentiric Proxy Service**, SIP trafiği için kritik bir yönlendirme ve güvenlik noktasıdır. Bu servis, gelen SIP isteklerini (özellikle `INVITE` ve `REGISTER`) alır, Sinyalleşme katmanına (`sip-signaling` / `registrar-service`) iletir ve yanıtları dış dünyaya yönlendirir.
+**Sentiric Proxy Service**, SIP trafiği için kritik bir yönlendirme ve güvenlik noktasıdır. Gelen SIP isteklerini (özellikle `INVITE` ve `REGISTER`) alır, analiz eder ve **Dahili Abone** veya **Yapay Zeka (AI)** ayrımını yaparak doğru hedefe yönlendirir.
 
-Bu servis, gelen ve giden SIP mesajlarını inceleyerek yük dengeleme (load balancing) ve topoloji gizleme (topology hiding) gibi işlemleri gerçekleştirir.
+Bu servis, sistemin "Santral Memuru" gibi çalışır.
 
 ## 🎯 Temel Sorumluluklar
 
-1.  **SIP Proxyleme:** Gelen SIP mesajlarını (UDP/TCP), hedef URI'sine göre doğru iç servise yönlendirir.
-2.  **Yük Dengeleme (SIP):** Birden fazla `registrar` veya `b2bua` servisi çalıştığında, trafiği sağlıklı olan servislere dağıtır.
-3.  **Topology Gizleme:** İç IP adreslerini dış dünyaya sızdırmaz.
-4.  **Hata Geri Dönüşü:** İç servislerden biri başarısız olduğunda, standart SIP hata kodlarıyla (örn: `503 Service Unavailable`) dış dünyaya yanıt verir.
+1.  **Akıllı Yönlendirme (Smart Routing):**
+    *   **Dahili Çağrılar:** Eğer aranan numara sistemde kayıtlı bir SIP abonesi ise (`registrar-service` sorgusu ile), çağrıyı doğrudan o aboneye bağlar (P2P/Internal).
+    *   **AI Çağrıları:** Eğer aranan numara bir abone değilse (veya dış hat ise), çağrıyı işlenmesi için `b2bua-service`'e (AI Orkestratörü) yönlendirir.
+2.  **SIP Proxyleme:** Gelen SIP mesajlarını (UDP/TCP) bozmadan iletir.
+3.  **Topology Gizleme:** İç IP adreslerini dış dünyaya sızdırmaz (`Via` ve `Record-Route` manipülasyonu).
+4.  **Yük Dengeleme:** Birden fazla `registrar` veya `b2bua` servisi çalıştığında trafiği dağıtır.
 
 ## 🛠️ Teknoloji Yığını
 
@@ -24,12 +26,15 @@ Bu servis, gelen ve giden SIP mesajlarını inceleyerek yük dengeleme (load bal
 ## 🔌 API Etkileşimleri
 
 *   **Gelen (Sunucu):**
-    *   SIP Sağlayıcıları / İstemcileri (UDP/TCP): Ham SIP trafiği.
+    *   SIP İstemcileri (Softphone/SBC): Ham SIP trafiği.
 *   **Giden (İstemci):**
-    *   `sentiric-registrar-service` (gRPC): Kayıt (REGISTER) trafiğini işlemek için.
-    *   `sentiric-b2bua-service` (gRPC): Çağrı (INVITE) trafiğini başlatmak için.
+    *   `sentiric-registrar-service` (gRPC): Kayıt (`REGISTER`) trafiği ve Abone Sorgulama (`Lookup`) için.
+    *   `sentiric-b2bua-service` (gRPC/SIP): AI tabanlı çağrıları başlatmak için.
 
 ---
 ## 🏛️ Anayasal Konum
 
 Bu servis, [Sentiric Anayasası'nın](https://github.com/sentiric/sentiric-governance) **Core Logic Layer**'ında yer alan yeni SIP Protokol Yönetimi bileşenidir.
+
+
+---
