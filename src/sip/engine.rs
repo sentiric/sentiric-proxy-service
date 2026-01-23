@@ -3,14 +3,17 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, error, instrument, warn};
-use sentiric_sip_core::{SipPacket, Method, HeaderName, Header}; 
+// DÜZELTME: sip-core'dan utils'i import et
+use sentiric_sip_core::{SipPacket, Method, HeaderName, Header, utils as sip_core_utils}; 
 use sentiric_contracts::sentiric::sip::v1::RegisterRequest;
 use tonic::Request;
 use crate::grpc::client::InternalClients;
+// DÜZELTME: Yerel utils'i import etmeye devam et (sadece get_header için)
 use crate::sip::utils;
 use crate::config::AppConfig;
 use tokio::net::lookup_host;
 use std::net::SocketAddr;
+use uuid::Uuid;
 
 pub struct ProxyEngine {
     clients: Arc<Mutex<InternalClients>>,
@@ -22,15 +25,17 @@ impl ProxyEngine {
         Self { clients, config }
     }
 
-    /// Gelen SIP paketlerini işler.
+    /// Gelen SIP paketlerini işler. Request veya Response olmasına göre yönlendirme yapar.
     #[instrument(skip(self, packet), fields(method = %packet.method, is_request = packet.is_request))]
     pub async fn process_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         
         if packet.is_request {
+            // --- REQUEST HANDLING ---
             match packet.method {
                 Method::Register => {
+                    // REGISTER işlemleri gRPC üzerinden Registrar'a gider, SIP yanıtı döner.
                     if let Some(resp) = self.handle_register(packet).await {
-                        return Some((resp, None));
+                        return Some((resp, None)); // Response to sender (User)
                     }
                     None
                 },
@@ -38,6 +43,8 @@ impl ProxyEngine {
                 _ => self.handle_passthrough_request(packet, src_addr).await, 
             }
         } else {
+            // --- RESPONSE HANDLING (100 Trying, 200 OK, etc.) ---
+            // B2BUA'dan gelen yanıtları User'a iletmek için.
             self.handle_response(packet).await
         }
     }
@@ -46,8 +53,9 @@ impl ProxyEngine {
         let to_header = utils::get_header(packet, HeaderName::To);
         let contact = utils::get_header(packet, HeaderName::Contact);
         
-        let aor = utils::extract_aor(&to_header); 
-        let contact_uri = utils::extract_aor(&contact); 
+        // DÜZELTME: Merkezi kütüphanedeki fonksiyon çağrılıyor
+        let aor = sip_core_utils::extract_aor(&to_header); 
+        let contact_uri = sip_core_utils::extract_aor(&contact); 
 
         info!("REGISTER Process: AOR='{}', Contact='{}'", aor, contact_uri);
 
@@ -75,8 +83,10 @@ impl ProxyEngine {
         // --- OUTBOUND TRAFFIC (B2BUA -> User) ---
         let user_agent = utils::get_header(packet, HeaderName::UserAgent);
         if user_agent.contains("Sentiric B2BUA") {
+            // B2BUA'dan geliyor -> Hedef Kullanıcı (Leg B)
             if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
                 info!("🔄 Outbound INVITE: B2BUA -> {}", target_addr);
+                // Via ekle (Geri dönüş yolu için Proxy IP'sini koyuyoruz)
                 self.add_via_header(packet);
                 return Some((packet.clone(), Some(target_addr)));
             } else {
@@ -91,6 +101,7 @@ impl ProxyEngine {
         
         info!("➡️ Inbound INVITE: User -> B2BUA: From={}, To={}", from, to);
 
+        // Hedef B2BUA adresini çöz (DNS veya IP)
         let b2bua_target = match lookup_host(&self.config.b2bua_sip_addr).await {
             Ok(mut addrs) => addrs.next(),
             Err(e) => {
@@ -100,7 +111,10 @@ impl ProxyEngine {
         };
 
         if let Some(target) = b2bua_target {
+            // Via Ekle: Packet B2BUA'ya gittiğinde, B2BUA yanıtı BİZE (Proxy'ye) göndersin.
+            // B2BUA yanıt verdiğinde, biz bu Via'yı söküp (pop) User'a göndereceğiz.
             self.add_via_header(packet);
+            
             return Some((packet.clone(), Some(target)));
         }
 
@@ -108,14 +122,19 @@ impl ProxyEngine {
     }
 
     async fn handle_passthrough_request(&self, packet: &mut SipPacket, _src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
+        // Genel Request Yönlendirme (ACK, BYE, CANCEL)
+        // Basit mantık: User-Agent kontrolü ile yön belirle
+        
         let user_agent = utils::get_header(packet, HeaderName::UserAgent);
         
         if user_agent.contains("Sentiric B2BUA") {
+             // B2BUA -> User
              if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
                  self.add_via_header(packet);
                  return Some((packet.clone(), Some(target_addr)));
              }
         } else {
+             // User -> B2BUA
              if let Ok(mut addrs) = lookup_host(&self.config.b2bua_sip_addr).await {
                  if let Some(target) = addrs.next() {
                      self.add_via_header(packet);
@@ -128,7 +147,9 @@ impl ProxyEngine {
 
     async fn handle_response(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
         let status = packet.status_code;
+        // info!("⬅️ Response Received: {} {}", status, packet.reason);
 
+        // 1. En üstteki Via başlığını (BİZİM eklediğimiz) çıkar.
         if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
             let _my_via = packet.headers.remove(0);
         } else {
@@ -136,6 +157,7 @@ impl ProxyEngine {
             return None;
         }
 
+        // 2. Sıradaki Via başlığına bak (Bu, paketin asıl sahibidir - User veya B2BUA)
         if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = self.parse_via_address(&client_via.value) {
                 info!("↩️ Routing Response ({}) to: {}", status, target);
@@ -151,7 +173,7 @@ impl ProxyEngine {
     }
 
     fn add_via_header(&self, packet: &mut SipPacket) {
-        let branch = format!("z9hG4bK-proxy-{}", uuid::Uuid::new_v4());
+        let branch = format!("z9hG4bK-proxy-{}", Uuid::new_v4());
         let via_val = format!("SIP/2.0/UDP {}:{};branch={}", 
             "proxy-service", 
             self.config.sip_port,
@@ -194,27 +216,20 @@ impl ProxyEngine {
         }
     }
 
-    // DÜZELTME: Bu fonksiyon optimize edildi.
     fn parse_via_address(&self, via_val: &str) -> Option<SocketAddr> {
-        // Via formatı: SIP/2.0/UDP 192.168.1.50:5060;branch=...
-        
         let parts: Vec<&str> = via_val.split_whitespace().collect();
         if parts.len() < 2 { return None; }
         
         let protocol_part = parts[1]; 
-        
-        // Önce ; ile ayır
         let params: Vec<&str> = protocol_part.split(';').collect();
         let host_port = params[0];
         
-        // Varsayılanları tanımla
         let (mut host, mut port) = if let Some((h, p)) = host_port.rsplit_once(':') {
             (h.to_string(), p.to_string())
         } else {
             (host_port.to_string(), "5060".to_string())
         };
 
-        // rport ve received varsa öncelikli kullan (NAT Traversal)
         for param in &params[1..] {
             if let Some((k, v)) = param.split_once('=') {
                 if k == "received" { host = v.to_string(); }

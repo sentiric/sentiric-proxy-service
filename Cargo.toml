@@ -17,4 +17,4 @@ config = "0.14"
 uuid = { version = "1.8", features = ["v4"] }
 
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.13.3" }
-sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.2.5" }
+sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.2.7" }
