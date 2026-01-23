@@ -101,24 +101,39 @@ impl ProxyEngine {
         
         info!("➡️ Inbound INVITE: User -> B2BUA: From={}, To={}", from, to);
 
-        // Hedef B2BUA adresini çöz (DNS veya IP)
-        let b2bua_target = match lookup_host(&self.config.b2bua_sip_addr).await {
-            Ok(mut addrs) => addrs.next(),
+        // --- KRİTİK LOGLAMA BAŞLANGICI ---
+        let b2bua_hostname = &self.config.b2bua_sip_addr;
+        let b2bua_target = match lookup_host(b2bua_hostname).await {
+            Ok(mut addrs) => {
+                let addr = addrs.next();
+                // DNS Çözümlemesini Logla
+                info!(target_host = %b2bua_hostname, resolved_addr = ?addr, "DNS lookup for B2BUA successful.");
+                addr
+            },
             Err(e) => {
-                error!("DNS Resolution Error (B2BUA: {}): {}", self.config.b2bua_sip_addr, e);
-                return Some((self.create_response(packet, 500, "Internal Error"), None));
+                error!(target_host = %b2bua_hostname, error = %e, "CRITICAL: DNS Resolution FAILED for B2BUA target!");
+                return Some((self.create_response(packet, 500, "Internal DNS Error"), None));
             }
         };
+        // --- KRİTİK LOGLAMA SONU ---
 
         if let Some(target) = b2bua_target {
             // Via Ekle: Packet B2BUA'ya gittiğinde, B2BUA yanıtı BİZE (Proxy'ye) göndersin.
             // B2BUA yanıt verdiğinde, biz bu Via'yı söküp (pop) User'a göndereceğiz.
             self.add_via_header(packet);
+
+            // Paketi göndermeden hemen önce son bir log daha
+            info!(forwarding_to = %target, "Forwarding INVITE packet to B2BUA.");
+
             
             return Some((packet.clone(), Some(target)));
         }
 
+        // DNS çözümleme başarısız olduysa veya adres bulunamadıysa
+        error!(target_host = %b2bua_hostname, "No valid IP address found for B2BUA after DNS lookup.");
+        
         Some((self.create_response(packet, 503, "Service Unavailable"), None))
+
     }
 
     async fn handle_passthrough_request(&self, packet: &mut SipPacket, _src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
