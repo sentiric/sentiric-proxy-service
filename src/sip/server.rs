@@ -20,9 +20,9 @@ impl SipServer {
         let transport = SipTransport::new(&bind_addr).await?;
         
         Ok(Self {
-            config,
+            config: config.clone(),
             transport: Arc::new(transport),
-            engine: ProxyEngine::new(clients),
+            engine: ProxyEngine::new(clients, config),
         })
     }
 
@@ -44,15 +44,15 @@ impl SipServer {
                         Ok((len, src_addr)) => {
                             let data = &buf[..len];
                             
-                            // Parse
                             match parser::parse(data) {
                                 Ok(packet) => {
                                     // Process
-                                    if let Some(response) = self.engine.process_packet(&packet).await {
-                                        // Send Response back to SBC (src_addr)
-                                        let resp_bytes = response.to_bytes();
-                                        if let Err(e) = self.transport.send(&resp_bytes, src_addr).await {
-                                            error!("Failed to send response: {}", e);
+                                    if let Some((resp_packet, target_addr)) = self.engine.process_packet(&packet).await {
+                                        let dest = target_addr.unwrap_or(src_addr);
+                                        let resp_bytes = resp_packet.to_bytes();
+                                        
+                                        if let Err(e) = self.transport.send(&resp_bytes, dest).await {
+                                            error!("Failed to send SIP packet to {}: {}", dest, e);
                                         }
                                     }
                                 },

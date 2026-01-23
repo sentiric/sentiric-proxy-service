@@ -12,9 +12,11 @@ pub struct AppConfig {
     pub sip_bind_ip: String,
     pub sip_port: u16,
     
-    // Internal Service Targets (gRPC)
+    // Internal Service Targets
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
+    // YENİ: B2BUA SIP Adresi (UDP Forwarding için)
+    pub b2bua_sip_addr: String,
     
     pub env: String,
     pub rust_log: String,
@@ -49,6 +51,10 @@ impl AppConfig {
                 .unwrap_or_else(|_| "registrar-service:13061".to_string()),
             b2bua_grpc_url: env::var("B2BUA_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "b2bua-service:13081".to_string()),
+            
+            // YENİ: B2BUA SIP Hedefi (Varsayılan: b2bua-service:13084)
+            b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET")
+                .unwrap_or_else(|_| "b2bua-service:13084".to_string()),
             
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
