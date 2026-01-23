@@ -79,61 +79,52 @@ impl ProxyEngine {
         }
     }
 
-    async fn handle_invite(&self, packet: &mut SipPacket, _src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // --- OUTBOUND TRAFFIC (B2BUA -> User) ---
-        let user_agent = utils::get_header(packet, HeaderName::UserAgent);
-        if user_agent.contains("Sentiric B2BUA") {
-            // B2BUA'dan geliyor -> Hedef Kullanıcı (Leg B)
+    async fn handle_invite(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
+        // --- YENİ YÖNLENDİRME MANTIĞI ---
+
+        // B2BUA'dan gelen paketleri ayırt etmenin en güvenilir yolu,
+        // paketin geldiği IP adresinin B2BUA'nın bilinen adresi olup olmadığını kontrol etmektir.
+        // Docker içinde bu, servis adıyla çözümlenen IP'dir.
+        
+        let b2bua_hostname = self.config.b2bua_sip_addr.split(':').next().unwrap_or("");
+        let is_from_b2bua = if let Ok(mut addrs) = lookup_host(b2bua_hostname).await {
+            addrs.any(|a| a.ip() == src_addr.ip())
+        } else {
+            false
+        };
+
+        if is_from_b2bua {
+            // --- OUTBOUND TRAFFIC (B2BUA -> User) ---
+            // Bu paket B2BUA'dan geliyor, hedef kullanıcıya (Leg B) gitmeli.
+            // Hedef adres, paketin Request-URI (ilk satır) kısmındadır.
+            // Örn: INVITE sip:1001@188.119.23.175:5060 SIP/2.0
+            
             if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
-                info!("🔄 Outbound INVITE: B2BUA -> {}", target_addr);
-                // Via ekle (Geri dönüş yolu için Proxy IP'sini koyuyoruz)
-                self.add_via_header(packet);
+                info!("🔄 Outbound INVITE Routing: B2BUA -> {}", target_addr);
+                self.add_via_header(packet); // Proxy'nin Via'sını ekle
                 return Some((packet.clone(), Some(target_addr)));
             } else {
-                error!("❌ Outbound INVITE hedef adresi çözülemedi: {}", packet.uri);
+                error!("❌ Outbound INVITE hedef adresi (Request-URI) çözülemedi: {}", packet.uri);
                 return None;
             }
-        }
-
-        // --- INBOUND TRAFFIC (User -> B2BUA) ---
-        let from = utils::get_header(packet, HeaderName::From);
-        let to = utils::get_header(packet, HeaderName::To);
-        
-        info!("➡️ Inbound INVITE: User -> B2BUA: From={}, To={}", from, to);
-
-        // --- KRİTİK LOGLAMA BAŞLANGICI ---
-        let b2bua_hostname = &self.config.b2bua_sip_addr;
-        let b2bua_target = match lookup_host(b2bua_hostname).await {
-            Ok(mut addrs) => {
-                let addr = addrs.next();
-                // DNS Çözümlemesini Logla
-                info!(target_host = %b2bua_hostname, resolved_addr = ?addr, "DNS lookup for B2BUA successful.");
-                addr
-            },
-            Err(e) => {
-                error!(target_host = %b2bua_hostname, error = %e, "CRITICAL: DNS Resolution FAILED for B2BUA target!");
-                return Some((self.create_response(packet, 500, "Internal DNS Error"), None));
-            }
-        };
-        // --- KRİTİK LOGLAMA SONU ---
-
-        if let Some(target) = b2bua_target {
-            // Via Ekle: Packet B2BUA'ya gittiğinde, B2BUA yanıtı BİZE (Proxy'ye) göndersin.
-            // B2BUA yanıt verdiğinde, biz bu Via'yı söküp (pop) User'a göndereceğiz.
-            self.add_via_header(packet);
-
-            // Paketi göndermeden hemen önce son bir log daha
-            info!(forwarding_to = %target, "Forwarding INVITE packet to B2BUA.");
-
+        } else {
+            // --- INBOUND TRAFFIC (User -> B2BUA) ---
+            // Bu paket dış dünyadan (SBC/User) geliyor.
+            let from = utils::get_header(packet, HeaderName::From);
+            let to = utils::get_header(packet, HeaderName::To);
             
-            return Some((packet.clone(), Some(target)));
+            info!("➡️ Inbound INVITE Routing: User -> B2BUA: From={}, To={}", from, to);
+
+            if let Ok(mut addrs) = lookup_host(&self.config.b2bua_sip_addr).await {
+                if let Some(target) = addrs.next() {
+                    self.add_via_header(packet);
+                    return Some((packet.clone(), Some(target)));
+                }
+            }
+
+            error!("CRITICAL: B2BUA adresi '{}' çözümlenemedi.", self.config.b2bua_sip_addr);
+            return Some((self.create_response(packet, 503, "Service Unavailable"), None));
         }
-
-        // DNS çözümleme başarısız olduysa veya adres bulunamadıysa
-        error!(target_host = %b2bua_hostname, "No valid IP address found for B2BUA after DNS lookup.");
-        
-        Some((self.create_response(packet, 503, "Service Unavailable"), None))
-
     }
 
     async fn handle_passthrough_request(&self, packet: &mut SipPacket, _src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
