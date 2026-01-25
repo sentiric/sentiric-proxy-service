@@ -44,6 +44,7 @@ services:
       #
       - REGISTRAR_SERVICE_TARGET_GRPC_URL=registrar-service:13061
       - B2BUA_SERVICE_TARGET_GRPC_URL=b2bua-service:13081
+      - DIALPLAN_SERVICE_TARGET_GRPC_URL=dialplan-service:12021
 
       # --- Security
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt

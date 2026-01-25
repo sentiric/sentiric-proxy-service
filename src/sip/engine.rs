@@ -5,6 +5,8 @@ use tokio::sync::Mutex;
 use tracing::{info, error, instrument, warn, debug};
 use sentiric_sip_core::{SipPacket, Method, HeaderName, Header, utils as sip_core_utils}; 
 use sentiric_contracts::sentiric::sip::v1::{RegisterRequest, LookupContactRequest};
+// YENİ: Dialplan Request Import
+use sentiric_contracts::sentiric::dialplan::v1::ResolveDialplanRequest;
 use tonic::Request;
 use crate::grpc::client::InternalClients;
 use crate::sip::utils;
@@ -49,12 +51,6 @@ impl ProxyEngine {
         
         let aor = sip_core_utils::extract_aor(&to_header); 
         
-        // --- KRİTİK DÜZELTME: NAT TRAVERSAL (Rport/Received Logic) ---
-        // İstemcinin Contact header'ında ne yazdığına bakmaksızın (çoğunlukla yanlış/private IP olur),
-        // paketin geldiği gerçek Soket Adresini (src_addr) "Contact URI" olarak kaydediyoruz.
-        // Bu, INVITE gönderirken modemin açık tuttuğu doğru NAT portuna gitmemizi sağlar.
-        
-        // Contact header'dan kullanıcı adını (örn: "1001") ayıklamaya çalış, yoksa AOR'dan al.
         let username = if let Some(user) = self.extract_username_from_uri(&contact_header) {
             user
         } else {
@@ -62,7 +58,6 @@ impl ProxyEngine {
         };
 
         // Gerçek erişilebilir adres (Örn: 1001@188.119.23.175:45212)
-        // Eğer transport tcp ise belirtmek gerekebilir ama şimdilik UDP varsayıyoruz.
         let real_contact_uri = format!("{}@{}:{}", username, src_addr.ip(), src_addr.port());
 
         info!("REGISTER NAT Fix: Claimed='{}' -> Registered='{}'", contact_header, real_contact_uri);
@@ -109,56 +104,100 @@ impl ProxyEngine {
             }
         } else {
             // --- INBOUND (User -> System) ---
+            // YENİ: Smart Routing with Dialplan Service
+            
             let from = utils::get_header(packet, HeaderName::From);
             let to = utils::get_header(packet, HeaderName::To);
-            let target_aor = sip_core_utils::extract_aor(&to);
             
-            info!("➡️ Inbound INVITE: {} -> {}", from, to);
+            // From ve To'dan sadece temiz AOR (numara) kısmını alıyoruz
+            let caller_aor = sip_core_utils::extract_aor(&from);
+            let callee_aor = sip_core_utils::extract_aor(&to);
+            
+            // "sip:" önekini de temizle, sadece numarayı/kullanıcı adını bırak
+            let caller = self.extract_username_from_uri(&caller_aor).unwrap_or(caller_aor.clone());
+            let callee = self.extract_username_from_uri(&callee_aor).unwrap_or(callee_aor.clone());
 
-            // 1. Dahili Abone Kontrolü
-            let lookup_result = {
+            info!("➡️ Inbound INVITE: {} ({}) -> {} ({})", from, caller, to, callee);
+
+            // 1. Dialplan Service'e Sor
+            let dialplan_result = {
                 let mut clients = self.clients.lock().await;
-                let req = Request::new(LookupContactRequest {
-                    sip_uri: target_aor.clone(),
+                let req = Request::new(ResolveDialplanRequest {
+                    caller_contact_value: caller.clone(),
+                    destination_number: callee.clone(),
                 });
-                clients.registrar.lookup_contact(req).await
+                clients.dialplan.resolve_dialplan(req).await
             };
 
-            match lookup_result {
+            match dialplan_result {
                 Ok(response) => {
-                    let contacts = response.into_inner().contact_uris;
-                    if !contacts.is_empty() {
-                        let contact_uri = &contacts[0];
+                    let resp = response.into_inner();
+                    // Protobuf'tan gelen Action struct'ının içindeki 'action' string alanı
+                    let action = resp.action.map(|a| a.action).unwrap_or_default();
+                    
+                    info!("🧠 Dialplan Kararı: {} (PlanID: {})", action, resp.dialplan_id);
+
+                    if action == "BRIDGE_CALL" {
+                        // --- DAHİLİ ABONE (P2P) ---
+                        // Registrar'dan hedefi bul ve oraya gönder
+                        let lookup_result = {
+                            let mut clients = self.clients.lock().await;
+                            let req = Request::new(LookupContactRequest {
+                                sip_uri: callee_aor.clone(),
+                            });
+                            clients.registrar.lookup_contact(req).await
+                        };
                         
-                        // Loop Koruması: Hedef adres kaynak adresle aynı mı?
-                        if let Some(target_addr) = self.extract_target_addr(contact_uri) {
-                             if target_addr == src_addr {
-                                 warn!("⚠️ Loop Detected: Hedef ({}) ile Kaynak ({}) aynı. Çağrı reddediliyor.", target_addr, src_addr);
-                                 return Some((self.create_response(packet, 482, "Loop Detected"), None));
-                             }
-                             
-                             info!("✅ Dahili Abone (NAT Çözümlü): {} -> {}", target_aor, target_addr);
-                             self.add_via_header(packet);
-                             return Some((packet.clone(), Some(target_addr)));
+                        match lookup_result {
+                            Ok(lookup_resp) => {
+                                let contacts = lookup_resp.into_inner().contact_uris;
+                                if !contacts.is_empty() {
+                                    let contact_uri = &contacts[0];
+                                    if let Some(target_addr) = self.extract_target_addr(contact_uri) {
+                                         if target_addr == src_addr {
+                                             warn!("⚠️ Loop Detected: Hedef ({}) ile Kaynak ({}) aynı.", target_addr, src_addr);
+                                             return Some((self.create_response(packet, 482, "Loop Detected"), None));
+                                         }
+                                         info!("✅ Dahili Abone (Bridge): {} -> {}", callee_aor, target_addr);
+                                         self.add_via_header(packet);
+                                         return Some((packet.clone(), Some(target_addr)));
+                                    }
+                                }
+                                // Eğer abone kayıtlı değilse B2BUA'ya fallback yapabiliriz veya 404 dönebiliriz.
+                                // Dialplan BRIDGE dedi ama abone yoksa, hata dönmek daha doğrudur.
+                                warn!("❌ Dialplan BRIDGE dedi ama abone ({}) kayıtlı değil.", callee_aor);
+                                return Some((self.create_response(packet, 404, "User Not Found"), None));
+                            }
+                            Err(e) => {
+                                error!("Registrar Hatası: {}", e);
+                                return Some((self.create_response(packet, 500, "Internal Server Error"), None));
+                            }
                         }
+
+                    } else if action == "START_AI_CONVERSATION" || action == "PROCESS_GUEST_CALL" || action == "PLAY_ANNOUNCEMENT" {
+                         // --- AI / SISTEM ÇAĞRISI (B2BUA) ---
+                         info!("🤖 AI Routing: {} -> B2BUA (Action: {})", callee_aor, action);
+                         if let Ok(mut addrs) = lookup_host(&self.config.b2bua_sip_addr).await {
+                            if let Some(target) = addrs.next() {
+                                self.add_via_header(packet);
+                                return Some((packet.clone(), Some(target)));
+                            }
+                        }
+                        error!("CRITICAL: B2BUA adresi '{}' çözümlenemedi.", self.config.b2bua_sip_addr);
+                        return Some((self.create_response(packet, 503, "Service Unavailable"), None));
+                    } else {
+                        // Bilinmeyen aksiyon
+                        warn!("⚠️ Bilinmeyen Dialplan Aksiyonu: {}", action);
+                        return Some((self.create_response(packet, 501, "Not Implemented"), None));
                     }
                 },
                 Err(e) => {
-                    warn!("Registrar Lookup hatası (B2BUA'ya fallback): {}", e);
+                    // Dialplan servisine ulaşılamazsa veya hata dönerse
+                    // Failsafe olarak B2BUA'ya göndermeyi deneyebiliriz veya reddederiz.
+                    error!("❌ Dialplan Service Error: {}", e);
+                    return Some((self.create_response(packet, 503, "Dialplan Error"), None));
                 }
             }
-
-            // 2. Varsayılan Rota (AI / B2BUA)
-            info!("🤖 AI Routing: {} -> B2BUA", target_aor);
-            if let Ok(mut addrs) = lookup_host(&self.config.b2bua_sip_addr).await {
-                if let Some(target) = addrs.next() {
-                    self.add_via_header(packet);
-                    return Some((packet.clone(), Some(target)));
-                }
-            }
-
-            error!("CRITICAL: B2BUA adresi '{}' çözümlenemedi.", self.config.b2bua_sip_addr);
-            return Some((self.create_response(packet, 503, "Service Unavailable"), None));
         }
     }
 
@@ -196,7 +235,6 @@ impl ProxyEngine {
         if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = self.parse_via_address(&client_via.value) {
                 
-                // DÜZELTME: Call-ID loglaması eklenebilir
                 debug!("↩️ Routing Response ({}) to: {}", status, target);
                 return Some((packet.clone(), Some(target)));
             }

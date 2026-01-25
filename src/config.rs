@@ -15,6 +15,8 @@ pub struct AppConfig {
     // Internal Service Targets
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
+    pub dialplan_grpc_url: String, // YENİ EKLENDİ
+
     // YENİ: B2BUA SIP Adresi (UDP Forwarding için)
     pub b2bua_sip_addr: String,
     
@@ -48,9 +50,12 @@ impl AppConfig {
 
             // Hedef Servisler
             registrar_grpc_url: env::var("REGISTRAR_SERVICE_TARGET_GRPC_URL")
-                .unwrap_or_else(|_| "registrar-service:13061".to_string()),
+                .unwrap_or_else(|_| "https://registrar-service:13061".to_string()),
             b2bua_grpc_url: env::var("B2BUA_SERVICE_TARGET_GRPC_URL")
-                .unwrap_or_else(|_| "b2bua-service:13081".to_string()),
+                .unwrap_or_else(|_| "https://b2bua-service:13081".to_string()),
+            // YENİ: Default Dialplan URL
+            dialplan_grpc_url: env::var("DIALPLAN_SERVICE_TARGET_GRPC_URL")
+                .unwrap_or_else(|_| "https://dialplan-service:12021".to_string()),
             
             // YENİ: B2BUA SIP Hedefi (Varsayılan: b2bua-service:13084)
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET")
@@ -58,7 +63,7 @@ impl AppConfig {
             
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.0.0".to_string()),
+            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.1.0".to_string()),
             
             cert_path: env::var("PROXY_SERVICE_CERT_PATH").context("ZORUNLU: PROXY_SERVICE_CERT_PATH eksik")?,
             key_path: env::var("PROXY_SERVICE_KEY_PATH").context("ZORUNLU: PROXY_SERVICE_KEY_PATH eksik")?,
