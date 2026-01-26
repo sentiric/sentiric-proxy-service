@@ -3,7 +3,7 @@ use crate::config::AppConfig;
 use crate::grpc::service::MyProxyService;
 use crate::grpc::client::InternalClients;
 use crate::tls::load_server_tls_config;
-use crate::sip::server::SipServer;
+use crate::sip::server::{SipServer, ProxyState}; // ProxyState eklendi
 use anyhow::{Context, Result};
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyServiceServer;
 use std::convert::Infallible;
@@ -60,12 +60,14 @@ impl App {
         let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
 
-        // 1. gRPC İstemcilerini Başlat
+        // 1. Paylaşılan Durum ve gRPC İstemcilerini Başlat
         let clients = Arc::new(Mutex::new(InternalClients::connect(&self.config).await?));
+        let state = Arc::new(ProxyState::new()); // YENİ: Paylaşılan state oluşturuldu
 
         // 2. SIP Sunucusunu Başlat
         let sip_config = self.config.clone();
-        let sip_server = SipServer::new(sip_config, clients.clone()).await?;
+        // YENİ: SipServer'a state de geçiriliyor
+        let sip_server = SipServer::new(sip_config, clients.clone(), state).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
         });
@@ -106,8 +108,8 @@ impl App {
         
         tokio::select! {
             res = grpc_server_handle => { if let Err(e) = res? { error!("gRPC Error: {}", e); } },
-            _res = sip_handle => { error!("SIP Server durdu"); },   // DÜZELTME: _res
-            _res = http_server_handle => { error!("HTTP Server durdu"); }, // DÜZELTME: _res
+            _res = sip_handle => { error!("SIP Server durdu"); },
+            _res = http_server_handle => { error!("HTTP Server durdu"); },
             _ = ctrl_c => { warn!("Kapatma sinyali alındı."); },
         }
 

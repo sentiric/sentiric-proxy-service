@@ -1,3 +1,4 @@
+
 // sentiric-proxy-service/src/config.rs
 use anyhow::{Context, Result};
 use std::env;
@@ -11,13 +12,14 @@ pub struct AppConfig {
     // SIP Network (UDP Dinleme)
     pub sip_bind_ip: String,
     pub sip_port: u16,
+    pub proxy_advertised_host: String, // YENİ: Via başlığı için
     
     // Internal Service Targets
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
-    pub dialplan_grpc_url: String, // YENİ EKLENDİ
+    pub dialplan_grpc_url: String,
 
-    // YENİ: B2BUA SIP Adresi (UDP Forwarding için)
+    // B2BUA SIP Adresi (UDP Forwarding için)
     pub b2bua_sip_addr: String,
     
     pub env: String,
@@ -47,17 +49,19 @@ impl AppConfig {
             
             sip_bind_ip: "0.0.0.0".to_string(),
             sip_port,
+            // YENİ: Via başlığında kullanılacak host adını ortam değişkeninden oku
+            proxy_advertised_host: env::var("PROXY_SERVICE_ADVERTISED_HOST")
+                .unwrap_or_else(|_| "proxy-service".to_string()),
 
             // Hedef Servisler
             registrar_grpc_url: env::var("REGISTRAR_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://registrar-service:13061".to_string()),
             b2bua_grpc_url: env::var("B2BUA_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://b2bua-service:13081".to_string()),
-            // YENİ: Default Dialplan URL
             dialplan_grpc_url: env::var("DIALPLAN_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://dialplan-service:12021".to_string()),
             
-            // YENİ: B2BUA SIP Hedefi (Varsayılan: b2bua-service:13084)
+            // B2BUA SIP Hedefi (docker-compose'da tanımlı olmalı)
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET")
                 .unwrap_or_else(|_| "b2bua-service:13084".to_string()),
             

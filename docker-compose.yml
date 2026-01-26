@@ -38,13 +38,14 @@ services:
       - PROXY_SERVICE_HTTP_PORT=13070
       - PROXY_SERVICE_GRPC_PORT=13071
       - PROXY_SERVICE_METRICS_PORT=13072
-      - PROXY_SERVICE_HOST=proxy-service
       - PROXY_SERVICE_SIP_PORT=13074
+      - PROXY_SERVICE_ADVERTISED_HOST=proxy-service # YENİ: Via başlığı için dışa açık host adı
 
       #
       - REGISTRAR_SERVICE_TARGET_GRPC_URL=registrar-service:13061
       - B2BUA_SERVICE_TARGET_GRPC_URL=b2bua-service:13081
       - DIALPLAN_SERVICE_TARGET_GRPC_URL=dialplan-service:12021
+      - B2BUA_SERVICE_SIP_TARGET=b2bua-service:13084 # YENİ/DÜZELTME: Eksik değişken eklendi
 
       # --- Security
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
@@ -76,4 +77,4 @@ services:
     #   # Uygulama Servisleri -> Sadece 'started' olmaları yeterli    
     #   registrar-service: { condition: service_started }
     #   b2bua-service: { condition: service_started }
-    #   dialplan-service: { condition: service_started }  
+    #   dialplan-service: { condition: service_started }
