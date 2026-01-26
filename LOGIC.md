@@ -1,63 +1,41 @@
-# 🛡️ Sentiric Proxy Service - Mantık ve Akış Mimarisi
+# 🛡️ Sentiric Proxy Service - Mantık Mimarisi (Final)
 
-**Stratejik Rol:** SIP trafiğini karşılayan, analiz eden ve doğru hedefe (Dahili Abone veya AI Motoru) yönlendiren akıllı yönlendirici.
+**Rol:** Platformun Trafik Polisi. Stateless (Durumsuz) Sinyalleşme Yönlendiricisi.
 
----
+## 1. Karar Matriksi (Routing Logic)
 
-## 1. Yönlendirme Akışı: REGISTER İsteği (Kimlik Kaydı)
+Proxy, gelen her `INVITE` paketi için şu sırayı izler:
+
+1.  **Kaynak Kontrolü (Outbound Check):**
+    *   Paket `b2bua-service`'ten mi geliyor?
+    *   **Evet:** Hedef dış dünyadır (PSTN/GSM). Paketi değiştirmeden hedefe ilet.
+    *   **Hayır:** Bu bir iç/gelen çağrıdır. Adım 2'ye geç.
+
+2.  **Hedef Analizi (Dialplan Lookup):**
+    *   `dialplan-service`'e sor: "Bu numara (Aranan) kime ait ve ne yapmalıyım?"
+    *   **Yanıt (Action):**
+        *   `BRIDGE_CALL`: Dahili arama. Adım 3'e geç.
+        *   `START_AI_*`: AI çağrısı. Adım 4'e geç.
+
+3.  **Dahili Yönlendirme (Internal):**
+    *   `registrar-service`'e sor: "Aranan kullanıcı şu an hangi IP'de?"
+    *   Gelen IP adresine paketi yönlendir. (Medya P2P akar, sunucuya uğramaz).
+
+4.  **AI Yönlendirme (Core):**
+    *   Paketi `b2bua-service`'e yönlendir. (Medya sunucu üzerinden akar).
+
+## 2. Akış Diyagramı
 
 ```mermaid
-sequenceDiagram
-    participant User as Softphone (User)
-    participant Proxy as Proxy Service
-    participant Registrar as Registrar Service
-
-    User->>Proxy: REGISTER
-    Note over Proxy: Hedefin kayıt işlemi olduğunu anlar.
-    Proxy->>Registrar: Register(sip_message, src_ip) (gRPC)
-    Registrar-->>Proxy: RegisterResponse (200 OK / 401 Unauthorized)
-    Proxy-->>User: 200 OK / 401 Unauthorized
-```
-
-## 2. Yönlendirme Akışı: INVITE (Çağrı Kurulumu)
-
-Proxy, gelen bir çağrıyı yönlendirirken aşağıdaki **Karar Ağacını** uygular:
-
-```mermaid
-sequenceDiagram
-    participant User as Caller
-    participant Proxy as Proxy Service
-    participant Registrar as Registrar Service
-    participant B2BUA as B2BUA (AI)
-    participant Callee as Callee (Internal)
-
-    User->>Proxy: INVITE (Aranan: 1001)
+graph TD
+    A[Gelen INVITE] --> B{Kaynağı B2BUA mı?};
+    B -- Evet (Outbound) --> C[Dış Dünyaya Gönder];
+    B -- Hayır (Inbound) --> D[Dialplan'a Sor];
     
-    Note over Proxy: 1. Kaynak Kontrolü: Çağrı B2BUA'dan mı geliyor?
+    D -- BRIDGE_CALL --> E[Registrar'a Sor];
+    E --> F[Dahili Aboneye Gönder];
     
-    alt Evet (B2BUA -> User)
-        Proxy->>User: INVITE (Outbound)
-    else Hayır (User -> System)
-        Note over Proxy: 2. Dahili Abone Kontrolü
-        Proxy->>Registrar: LookupContact("1001")
-        
-        alt Abone Kayıtlı (Internal Call)
-            Registrar-->>Proxy: Contact: "1.2.3.4:5060"
-            Proxy->>Callee: INVITE (Doğrudan Yönlendirme)
-        else Abone Yok (AI Call)
-            Registrar-->>Proxy: Empty
-            Note over Proxy: 3. Varsayılan Rota (AI)
-            Proxy->>B2BUA: INVITE (AI Başlatma)
-        end
-    end
+    D -- AI_ACTION --> G[B2BUA'ya Gönder];
 ```
-
-### Karar Matriksi
-
-| Durum | Kontrol | Aksiyon | Hedef |
-| :--- | :--- | :--- | :--- |
-| **Outbound** | Kaynak IP == B2BUA IP? | Çağrıyı kullanıcıya ilet. | `Request-URI` |
-| **Internal** | Hedef URI `registrar`'da kayıtlı mı? | Çağrıyı aboneye ilet. | `Registered Contact IP` |
-| **Default** | Yukarıdakilerin hiçbiri değilse. | Çağrıyı AI motoruna ilet. | `b2bua-service` |
 
 ---
