@@ -1,4 +1,3 @@
-
 // sentiric-proxy-service/src/config.rs
 use anyhow::{Context, Result};
 use std::env;
@@ -12,14 +11,15 @@ pub struct AppConfig {
     // SIP Network (UDP Dinleme)
     pub sip_bind_ip: String,
     pub sip_port: u16,
-    pub proxy_advertised_host: String, // YENİ: Via başlığı için
+    pub proxy_advertised_host: String,
     
-    // Internal Service Targets
+    // Internal Service Targets (gRPC Clients)
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
     pub dialplan_grpc_url: String,
 
-    // B2BUA SIP Adresi (UDP Forwarding için)
+    // Routing Targets (SIP Forwarding)
+    // SBC'ye "Paketi buraya at" diyeceğimiz adres.
     pub b2bua_sip_addr: String,
     
     pub env: String,
@@ -49,11 +49,10 @@ impl AppConfig {
             
             sip_bind_ip: "0.0.0.0".to_string(),
             sip_port,
-            // YENİ: Via başlığında kullanılacak host adını ortam değişkeninden oku
             proxy_advertised_host: env::var("PROXY_SERVICE_ADVERTISED_HOST")
                 .unwrap_or_else(|_| "proxy-service".to_string()),
 
-            // Hedef Servisler
+            // Hedef Servisler (gRPC)
             registrar_grpc_url: env::var("REGISTRAR_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://registrar-service:13061".to_string()),
             b2bua_grpc_url: env::var("B2BUA_SERVICE_TARGET_GRPC_URL")
@@ -61,9 +60,10 @@ impl AppConfig {
             dialplan_grpc_url: env::var("DIALPLAN_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://dialplan-service:12021".to_string()),
             
-            // B2BUA SIP Hedefi (docker-compose'da tanımlı olmalı)
+            // B2BUA SIP Hedefi (SBC Yönlendirmesi İçin)
+            // Örn: "b2bua-service.service.sentiric.cloud:13084"
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET")
-                .unwrap_or_else(|_| "b2bua-service:13084".to_string()),
+                .context("ZORUNLU: B2BUA_SERVICE_SIP_TARGET eksik")?,
             
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),

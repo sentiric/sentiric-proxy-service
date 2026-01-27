@@ -5,9 +5,18 @@ use sentiric_contracts::sentiric::sip::v1::{
 };
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument};
+use std::sync::Arc;
+use crate::config::AppConfig;
 
-// Bu, bir SIP Proxy'sinin alacağı tek gRPC isteği (Diğer servisler bu servisten SIP ile konuşmak istediğinde)
-pub struct MyProxyService {}
+pub struct MyProxyService {
+    config: Arc<AppConfig>,
+}
+
+impl MyProxyService {
+    pub fn new(config: Arc<AppConfig>) -> Self {
+        Self { config }
+    }
+}
 
 #[tonic::async_trait]
 impl ProxyService for MyProxyService {
@@ -17,13 +26,28 @@ impl ProxyService for MyProxyService {
         &self,
         request: Request<GetNextHopRequest>,
     ) -> Result<Response<GetNextHopResponse>, Status> {
-        info!("GetNextHop RPC isteği alındı. SIP mesajı analiz ediliyor...");
-        let _req = request.into_inner(); // DÜZELTME: req -> _req (Henüz kullanılmıyor)
+        let req = request.into_inner();
         
-        // Basit bir placeholder yönlendirme mantığı: Her şeyi B2BUA'ya gönder.
+        info!(
+            "GetNextHop RPC isteği alındı. Kaynak IP: {}, Hedef URI: {}", 
+            req.source_ip, 
+            req.destination_uri
+        );
+        
+        // --- YÖNLENDİRME MANTIĞI ---
+        // Şu an için tüm bilinmeyen dış trafiği (SBC'den gelen)
+        // doğrudan B2BUA'ya (AI Orkestratörü) yönlendiriyoruz.
+        // İleride burada daha karmaşık Load Balancing yapılabilir.
+        
+        let target_sip_uri = self.config.b2bua_sip_addr.clone();
+        
+        info!("Yönlendirme kararı verildi -> B2BUA ({})", target_sip_uri);
+
         let next_hop = GetNextHopResponse {
-            uri: "sentiric-b2bua-service:12081".to_string(), 
-            gateway_id: "sentiric-b2bua".to_string(),
+            // Bu URI, SBC tarafından alınıp `transport.send` ile kullanılacak.
+            // Örn: "b2bua-service.service.sentiric.cloud:13084"
+            uri: target_sip_uri, 
+            gateway_id: "sentiric-b2bua-primary".to_string(),
         };
 
         Ok(Response::new(next_hop))

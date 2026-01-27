@@ -3,7 +3,7 @@ use crate::config::AppConfig;
 use crate::grpc::service::MyProxyService;
 use crate::grpc::client::InternalClients;
 use crate::tls::load_server_tls_config;
-use crate::sip::server::{SipServer, ProxyState}; // ProxyState eklendi
+use crate::sip::server::{SipServer, ProxyState};
 use anyhow::{Context, Result};
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyServiceServer;
 use std::convert::Infallible;
@@ -62,11 +62,10 @@ impl App {
 
         // 1. Paylaşılan Durum ve gRPC İstemcilerini Başlat
         let clients = Arc::new(Mutex::new(InternalClients::connect(&self.config).await?));
-        let state = Arc::new(ProxyState::new()); // YENİ: Paylaşılan state oluşturuldu
+        let state = Arc::new(ProxyState::new()); 
 
         // 2. SIP Sunucusunu Başlat
         let sip_config = self.config.clone();
-        // YENİ: SipServer'a state de geçiriliyor
         let sip_server = SipServer::new(sip_config, clients.clone(), state).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
@@ -76,7 +75,9 @@ impl App {
         let grpc_config = self.config.clone();
         let grpc_server_handle = tokio::spawn(async move {
             let tls_config = load_server_tls_config(&grpc_config).await.expect("TLS hatası");
-            let grpc_service = MyProxyService {}; 
+            
+            // DÜZELTME: Config servise enjekte ediliyor.
+            let grpc_service = MyProxyService::new(grpc_config.clone()); 
             
             info!(address = %grpc_config.grpc_listen_addr, "gRPC sunucusu başlatılıyor...");
             
