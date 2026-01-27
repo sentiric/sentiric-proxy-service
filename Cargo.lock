@@ -1165,8 +1165,8 @@ dependencies = [
 
 [[package]]
 name = "sentiric-contracts"
-version = "1.13.5"
-source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.13.5#ca70476962acd0348f47cd067ace2661f9295761"
+version = "1.13.6"
+source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.13.6#ac2481c2e42327e85bac76e6ee10a0605860f262"
 dependencies = [
  "prost",
  "prost-types",

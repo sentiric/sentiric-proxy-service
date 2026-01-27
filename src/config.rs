@@ -8,25 +8,25 @@ pub struct AppConfig {
     pub grpc_listen_addr: SocketAddr,
     pub http_listen_addr: SocketAddr,
     
-    // SIP Network (UDP Dinleme)
+    // SIP Network
     pub sip_bind_ip: String,
     pub sip_port: u16,
     pub proxy_advertised_host: String,
     
-    // Internal Service Targets (gRPC Clients)
+    // Internal Service Targets (gRPC)
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
     pub dialplan_grpc_url: String,
 
-    // Routing Targets (SIP Forwarding)
-    // SBC'ye "Paketi buraya at" diyeceğimiz adres.
-    pub b2bua_sip_addr: String,
+    // [YENİ] Routing Targets (SIP Forwarding Destinations)
+    pub b2bua_sip_addr: String,     // INVITE'lar için
+    pub registrar_sip_addr: String, // REGISTER'lar için (Genellikle Proxy'nin kendisi)
     
     pub env: String,
     pub rust_log: String,
     pub service_version: String,
     
-    // TLS Yolları
+    // TLS
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
@@ -34,7 +34,6 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
-        // Proxy Harmonik Portlar: 1307X
         let grpc_port = env::var("PROXY_SERVICE_GRPC_PORT").unwrap_or_else(|_| "13071".to_string());
         let http_port = env::var("PROXY_SERVICE_HTTP_PORT").unwrap_or_else(|_| "13070".to_string());
         let sip_port_str = env::var("PROXY_SERVICE_SIP_PORT").unwrap_or_else(|_| "13074".to_string());
@@ -52,7 +51,6 @@ impl AppConfig {
             proxy_advertised_host: env::var("PROXY_SERVICE_ADVERTISED_HOST")
                 .unwrap_or_else(|_| "proxy-service".to_string()),
 
-            // Hedef Servisler (gRPC)
             registrar_grpc_url: env::var("REGISTRAR_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://registrar-service:13061".to_string()),
             b2bua_grpc_url: env::var("B2BUA_SERVICE_TARGET_GRPC_URL")
@@ -60,10 +58,13 @@ impl AppConfig {
             dialplan_grpc_url: env::var("DIALPLAN_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://dialplan-service:12021".to_string()),
             
-            // B2BUA SIP Hedefi (SBC Yönlendirmesi İçin)
-            // Örn: "b2bua-service.service.sentiric.cloud:13084"
+            // [HEDEFLERİ OKU]
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET")
                 .context("ZORUNLU: B2BUA_SERVICE_SIP_TARGET eksik")?,
+                
+            // Varsayılan olarak Proxy'nin kendi SIP portunu kullanır (13074)
+            registrar_sip_addr: env::var("REGISTRAR_SERVICE_SIP_TARGET")
+                .unwrap_or_else(|_| "proxy-service:13074".to_string()),
             
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
