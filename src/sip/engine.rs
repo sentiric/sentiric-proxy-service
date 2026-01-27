@@ -243,12 +243,12 @@ impl ProxyEngine {
 
     /// Pakete kendi Via başlığımızı ekler.
     fn add_via_header(&self, packet: &mut SipPacket) {
-        let branch = format!("z9hG4bK-proxy-{}", Uuid::new_v4());
-        let via_val = format!(
-            "SIP/2.0/UDP {}:{};branch={}",
-            self.config.proxy_advertised_host, self.config.sip_port, branch
+        let via_header = sentiric_sip_core::builder::build_via_header(
+            &self.config.proxy_advertised_host,
+            self.config.sip_port,
+            "UDP",
         );
-        packet.headers.insert(0, Header::new(HeaderName::Via, via_val));
+        packet.headers.insert(0, via_header);
     }
 
     /// Standart bir SIP yanıt paketi oluşturur.
