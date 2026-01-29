@@ -18,9 +18,10 @@ pub struct AppConfig {
     pub b2bua_grpc_url: String,
     pub dialplan_grpc_url: String,
 
-    // [YENİ] Routing Targets (SIP Forwarding Destinations)
+    // Routing Targets (SIP Forwarding Destinations)
     pub b2bua_sip_addr: String,     // INVITE'lar için
-    pub registrar_sip_addr: String, // REGISTER'lar için (Genellikle Proxy'nin kendisi)
+    pub registrar_sip_addr: String, // REGISTER'lar için
+    pub probe_sip_addr: String,     // YENİ: Test/Probe için (9998)
     
     pub env: String,
     pub rust_log: String,
@@ -58,13 +59,15 @@ impl AppConfig {
             dialplan_grpc_url: env::var("DIALPLAN_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://dialplan-service:12021".to_string()),
             
-            // [HEDEFLERİ OKU]
+            // [SIP HEDEFLERİ]
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET")
                 .context("ZORUNLU: B2BUA_SERVICE_SIP_TARGET eksik")?,
-                
-            // Varsayılan olarak Proxy'nin kendi SIP portunu kullanır (13074)
             registrar_sip_addr: env::var("REGISTRAR_SERVICE_SIP_TARGET")
                 .unwrap_or_else(|_| "proxy-service:13074".to_string()),
+            
+            // YENİ: Probe Adresi (Opsiyonel default verilebilir)
+            probe_sip_addr: env::var("PROBE_SERVICE_SIP_TARGET")
+                .unwrap_or_else(|_| "sip-probe:13024".to_string()),
             
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),

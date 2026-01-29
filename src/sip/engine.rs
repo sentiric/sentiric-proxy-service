@@ -12,8 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
 use tracing::{debug, error, info, instrument, warn};
-// unused import: `uuid::Uuid`
-use uuid::Uuid;
+// use uuid::Uuid;
 
 pub struct ProxyEngine {
     clients: Arc<Mutex<InternalClients>>,
@@ -120,15 +119,37 @@ impl ProxyEngine {
             return None;
         }
 
-        // Inbound Çağrı: Paket dış dünyadan geliyorsa, dialplan'e sorulur.
-        let from = utils::get_header(packet, HeaderName::From);
         let to = utils::get_header(packet, HeaderName::To);
-        let caller_aor = sip_core_utils::extract_aor(&from);
         let callee_aor = sip_core_utils::extract_aor(&to);
-        let caller = self.extract_username_from_uri(&caller_aor).unwrap_or(caller_aor);
-        let callee = self.extract_username_from_uri(&callee_aor).unwrap_or(callee_aor.clone());
+        let callee_username = self.extract_username_from_uri(&callee_aor).unwrap_or_default();
 
-        info!("➡️ Inbound INVITE: {} -> {}", caller, callee);
+        // -------------------------------------------------------------
+        // 🔥 YENİ: PROBE / TEST NUMARASI YÖNLENDİRMESİ
+        // 9998 aranırsa, trafiği sip-probe servisine yönlendir.
+        // -------------------------------------------------------------
+        if callee_username == "9998" {
+            info!("🧪 PROBE TEST: Çağrı sip-probe servisine yönlendiriliyor -> {}", self.config.probe_sip_addr);
+            
+            // Probe adresini çözümle (Consul DNS üzerinden)
+            let probe_addr = match self.state.resolve_b2bua_addr(&self.config.probe_sip_addr).await {
+                Ok(addr) => addr,
+                Err(e) => {
+                    error!(error = %e, "KRİTİK: Probe adresi çözümlenemedi.");
+                    return Some((self.create_response(packet, 503, "Probe Unavailable"), Some(src_addr)));
+                }
+            };
+            
+            self.add_via_header(packet);
+            return Some((packet.clone(), Some(probe_addr)));
+        }
+        // -------------------------------------------------------------
+
+        // Normal Inbound Çağrı: Paket dış dünyadan geliyorsa, dialplan'e sorulur.
+        let from = utils::get_header(packet, HeaderName::From);
+        let caller_aor = sip_core_utils::extract_aor(&from);
+        let caller = self.extract_username_from_uri(&caller_aor).unwrap_or(caller_aor);
+
+        info!("➡️ Inbound INVITE: {} -> {}", caller, callee_username);
 
         let dialplan_result = {
             let mut clients = self.clients.lock().await;
@@ -136,7 +157,7 @@ impl ProxyEngine {
                 .dialplan
                 .resolve_dialplan(Request::new(ResolveDialplanRequest {
                     caller_contact_value: caller,
-                    destination_number: callee,
+                    destination_number: callee_username.clone(), // Clone gerekli olabilir
                 }))
                 .await
         };
@@ -180,7 +201,6 @@ impl ProxyEngine {
         };
 
         match lookup_result {
-            // DÜZELTME: E0507 - Match guard kaldırıldı, sahiplik hatası giderildi.
             Ok(lookup_resp) => {
                 let contacts = lookup_resp.into_inner().contact_uris;
                 if !contacts.is_empty() {
@@ -211,7 +231,7 @@ impl ProxyEngine {
     /// ACK, BYE gibi diyalog içi istekleri hedeflerine yönlendirir.
     async fn handle_passthrough_request(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
         if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
-            debug!(" पास-थ्रू Request ({}) -> {}", packet.method, target_addr);
+            debug!("➡️ Passthrough Request ({}) -> {}", packet.method, target_addr);
             self.add_via_header(packet);
             Some((packet.clone(), Some(target_addr)))
         } else {
@@ -233,7 +253,6 @@ impl ProxyEngine {
         // 2. Zincirdeki bir sonraki (artık ilk sıradaki) Via başlığına bakarak hedefi bul.
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = self.parse_via_address(&next_via.value) {
-                // DÜZELTME: E0599 - .unwrap_or(0) kaldırıldı, packet.status_code (u16) doğrudan kullanıldı.
                 debug!("↩️ Yönlendirme Yanıtı ({}) -> {}", packet.status_code, target);
                 return Some((packet.clone(), Some(target)));
             }
@@ -268,7 +287,8 @@ impl ProxyEngine {
     /// URI'dan kullanıcı adını (örn: "1001") çıkarır.
     fn extract_username_from_uri(&self, uri: &str) -> Option<String> {
         let clean = uri.trim_start_matches('<').trim_start_matches("sip:");
-        clean.find('@').map(|at_idx| clean[..at_idx].to_string())
+        let end_idx = clean.find('@').or_else(|| clean.find(':')).unwrap_or(clean.len());
+        Some(clean[..end_idx].to_string())
     }
 
     /// SIP URI'dan (örn: "sip:1001@1.2.3.4:5060") hedef `SocketAddr`'ı çıkarır.
