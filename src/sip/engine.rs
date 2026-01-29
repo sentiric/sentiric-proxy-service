@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
 use tracing::{debug, error, info, instrument, warn};
+// unused import: `uuid::Uuid`
 use uuid::Uuid;
 
 pub struct ProxyEngine {
