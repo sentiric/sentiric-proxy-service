@@ -2,7 +2,7 @@
 
 use crate::config::AppConfig;
 use crate::grpc::client::InternalClients;
-use crate::sip::engine::{ProxyEngine, RedisConn}; // RedisConn import edildi
+use crate::sip::engine::{ProxyEngine, RedisConn};
 use anyhow::{anyhow, Result};
 use sentiric_sip_core::{parser, SipTransport};
 use std::net::SocketAddr;
@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 use tokio::net::lookup_host;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
+
+// --- DÜZELTME: Sabit public yapıldı ---
+pub const DEFAULT_SIP_PORT: u16 = 5060;
 
 #[derive(Default)]
 struct DnsCache {
@@ -57,12 +60,11 @@ pub struct SipServer {
 }
 
 impl SipServer {
-    // --- DÜZELTME: Fonksiyon imzası 4 argüman alacak şekilde güncellendi ---
     pub async fn new(
         config: Arc<AppConfig>,
         clients: Arc<Mutex<InternalClients>>,
         state: Arc<ProxyState>,
-        redis: RedisConn, // Redis bağlantısını burada kabul et
+        redis: RedisConn,
     ) -> Result<Self> {
         let bind_addr = format!("{}:{}", config.sip_bind_ip, config.sip_port);
         let transport = SipTransport::new(&bind_addr).await?;
@@ -70,7 +72,6 @@ impl SipServer {
         Ok(Self {
             config: config.clone(),
             transport: Arc::new(transport),
-            // --- DÜZELTME: Redis bağlantısını Engine'e ilet ---
             engine: ProxyEngine::new(clients, config, state, redis),
         })
     }
