@@ -2,7 +2,7 @@
 
 use crate::config::AppConfig;
 use crate::grpc::client::InternalClients;
-use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT}; // DEFAULT_SIP_PORT import edildi
+use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::utils;
 use sentiric_contracts::sentiric::sip::v1::RegisterRequest;
 use sentiric_sip_core::{utils as sip_core_utils, Header, HeaderName, Method, SipPacket};
@@ -13,7 +13,6 @@ use tonic::Request;
 use tracing::{error, info, instrument, warn, debug};
 use redis::AsyncCommands;
 
-// Redis Connection Tipi
 pub type RedisConn = Arc<Mutex<redis::aio::MultiplexedConnection>>;
 
 pub struct ProxyEngine {
@@ -44,7 +43,7 @@ impl ProxyEngine {
         if packet.is_request {
             self.handle_request(packet, src_addr).await
         } else {
-            self.handle_response(packet, src_addr).await
+            self.handle_response(packet).await
         }
     }
 
@@ -53,12 +52,11 @@ impl ProxyEngine {
             return self.handle_register(packet, src_addr).await;
         }
 
-        let _call_id = utils::get_header(packet, HeaderName::CallId);
-        let _from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
-        let _to_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::To)); 
+        let to_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::To));
+        let has_route_header = packet.headers.iter().any(|h| h.name == HeaderName::Route);
 
-        if packet.headers.iter().any(|h| h.name == HeaderName::Route) {
-            debug!("🔄 [PROXY-HANDLE] Diyalog içi istek (Route Header var): {}", packet.method);
+        if !to_tag.is_empty() || has_route_header {
+            debug!("🔄 [PROXY-HANDLE] Diyalog içi istek (To-Tag veya Route var): {}", packet.method);
             return self.handle_in_dialog_request(packet, src_addr).await;
         }
         
@@ -82,16 +80,17 @@ impl ProxyEngine {
         let to_header = utils::get_header(packet, HeaderName::To);
         let aor = sip_core_utils::extract_aor(&to_header);
         let username = sip_core_utils::extract_username_from_uri(&aor);
-        let real_contact_uri = format!("sip:{}@{}:{}", username, src_addr.ip(), src_addr.port());
+        let client_addr = self.parse_via_address(&utils::get_header(packet, HeaderName::Via)).unwrap_or(src_addr);
+        let real_contact_uri = format!("sip:{}@{}:{}", username, client_addr.ip(), client_addr.port());
 
         let mut clients = self.clients.lock().await;
         let req = Request::new(RegisterRequest { sip_uri: aor, contact_uri: real_contact_uri, expires: 3600 });
 
         match clients.registrar.register(req).await {
-            Ok(_) => Some((self.create_response(packet, 200, "OK"), Some(src_addr))),
+            Ok(_) => Some((self.create_response(packet, 200, "OK"), Some(client_addr))),
             Err(e) => {
                 error!("Registrar Service error: {}", e);
-                Some((self.create_response(packet, 500, "Internal Server Error"), Some(src_addr)))
+                Some((self.create_response(packet, 500, "Internal Server Error"), Some(client_addr)))
             }
         }
     }
@@ -101,6 +100,7 @@ impl ProxyEngine {
         let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
         let to_aor = sip_core_utils::extract_aor(&utils::get_header(packet, HeaderName::To));
         let callee_username = sip_core_utils::extract_username_from_uri(&to_aor);
+        let client_addr = self.parse_via_address(&utils::get_header(packet, HeaderName::Via)).unwrap_or(src_addr);
 
         let target_host = if callee_username == "9998" {
             info!("🎯 [PROXY-ROUTE] INVITE -> PROBE (9998)");
@@ -114,7 +114,7 @@ impl ProxyEngine {
             Ok(addr) => addr,
             Err(e) => {
                 error!("❌ Hedef çözümlenemedi: {}: {}", target_host, e);
-                return Some((self.create_response(packet, 503, "Service Unavailable"), Some(src_addr)));
+                return Some((self.create_response(packet, 503, "Service Unavailable"), Some(client_addr)));
             }
         };
 
@@ -122,9 +122,9 @@ impl ProxyEngine {
         let target_leg_key_placeholder = format!("proxy:route:{}:{}", call_id, "callee");
 
         let mut conn = self.redis.lock().await;
-        let _: () = conn.set_ex(&client_leg_key, src_addr.to_string(), 300).await.unwrap_or_default();
+        let _: () = conn.set_ex(&client_leg_key, client_addr.to_string(), 300).await.unwrap_or_default();
         let _: () = conn.set_ex(&target_leg_key_placeholder, target_addr.to_string(), 300).await.unwrap_or_default();
-        debug!("💾 [PROXY-STATE] CACHE SET (Leg A): {} -> {}", client_leg_key, src_addr);
+        debug!("💾 [PROXY-STATE] CACHE SET (Leg A): {} -> {}", client_leg_key, client_addr);
         debug!("💾 [PROXY-STATE] CACHE SET (Leg B Placeholder): {} -> {}", target_leg_key_placeholder, target_addr);
 
         self.add_record_route(packet);
@@ -136,13 +136,11 @@ impl ProxyEngine {
     async fn handle_in_dialog_request(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Route {
              packet.headers.remove(0);
-        } else {
-            warn!("⚠️ [PROXY-STATE] Gelen diyalog içi istekte Route başlığı bulunamadı.");
-            return Some((self.create_response(packet, 400, "Bad Request (Missing Route)"), Some(src_addr)));
         }
 
         let call_id = utils::get_header(packet, HeaderName::CallId);
-        let _from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
+        // --- DÜZELTME: `from_tag` artık loglama için kullanılıyor ---
+        let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
         let to_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::To));
 
         let target_redis_key = if !to_tag.is_empty() {
@@ -151,6 +149,8 @@ impl ProxyEngine {
             format!("proxy:route:{}:{}", call_id, "callee")
         };
         
+        debug!("- [PROXY-STATE] In-dialog lookup using from_tag: {}, to_tag: {}", from_tag, to_tag);
+
         let mut conn = self.redis.lock().await;
         match conn.get::<_, String>(&target_redis_key).await {
             Ok(target_str) => {
@@ -170,9 +170,9 @@ impl ProxyEngine {
         }
     }
     
-    async fn handle_response(&self, packet: &mut SipPacket, _src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
+    async fn handle_response(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
         if packet.headers.is_empty() || packet.headers[0].name != HeaderName::Via {
-            warn!("⚠️ [PROXY-HANDLE] Yanıt paketinde kendi Via başlığı bulunamadı. Muhtemelen doğrudan istemciye gitmeliydi.");
+            warn!("⚠️ [PROXY-HANDLE] Yanıt paketinde kendi Via başlığı bulunamadı.");
             return None;
         }
         packet.headers.remove(0);
@@ -181,7 +181,7 @@ impl ProxyEngine {
         let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
         let to_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::To));
 
-        if packet.status_code == 200 && !to_tag.is_empty() {
+        if packet.status_code >= 200 && !to_tag.is_empty() {
             let old_key = format!("proxy:route:{}:{}", call_id, "callee");
             let new_key = format!("proxy:route:{}:{}", call_id, to_tag);
             let mut conn = self.redis.lock().await;
@@ -202,21 +202,16 @@ impl ProxyEngine {
                     None
                 }
             }
-            Err(e) => {
-                warn!("⚠️ [PROXY-STATE] CACHE MISS (Response Routing): {}. Hata: {}. Yanıt düşürülüyor.", target_redis_key, e);
+            Err(_) => {
+                warn!("⚠️ [PROXY-STATE] CACHE MISS (Response Routing): {}. Via'dan fallback deniyor.", target_redis_key);
                 if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
-                    if let Some(target) = self.parse_via_address(&next_via.value) {
-                        warn!("⚠️ [PROXY-STATE] Redis'ten bulunamadı, Via header'dan fallback yönlendirme: {}", target);
-                        return Some((packet.clone(), Some(target)));
-                    }
+                    return self.parse_via_address(&next_via.value).map(|target| (packet.clone(), Some(target)));
                 }
                 None
             }
         }
     }
     
-    // --- HELPER FUNCTIONS ---
-
     fn add_via_header(&self, packet: &mut SipPacket) {
         let via_header = sentiric_sip_core::builder::build_via_header(&self.config.proxy_advertised_host, self.config.sip_port, "UDP");
         debug!("Adding Via Header: {}", via_header.value);
@@ -271,11 +266,15 @@ impl ProxyEngine {
             if let Some((k, v)) = p_trim.split_once('=') {
                 if k == "received" { received = Some(v.to_string()); }
                 if k == "rport" { rport = Some(v.to_string()); }
+            } else if p_trim == "rport" {
+                rport = Some("".to_string());
             }
         }
 
-        if let (Some(r), Some(rec)) = (rport, received) {
-            return format!("{}:{}", rec, r).parse().ok();
+        if let (Some(rec), Some(rp)) = (received, rport) {
+            if !rp.is_empty() {
+                return format!("{}:{}", rec, rp).parse().ok();
+            }
         }
 
         if !host_part.contains(':') {
