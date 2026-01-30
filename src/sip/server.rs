@@ -2,7 +2,7 @@
 
 use crate::config::AppConfig;
 use crate::grpc::client::InternalClients;
-use crate::sip::engine::ProxyEngine;
+use crate::sip::engine::{ProxyEngine, RedisConn}; // RedisConn import edildi
 use anyhow::{anyhow, Result};
 use sentiric_sip_core::{parser, SipTransport};
 use std::net::SocketAddr;
@@ -12,7 +12,6 @@ use tokio::net::lookup_host;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-// YENİ: DNS Cache ve Paylaşılan Durum
 #[derive(Default)]
 struct DnsCache {
     addr: Option<(SocketAddr, Instant)>,
@@ -29,7 +28,6 @@ impl ProxyState {
         }
     }
 
-    // B2BUA adresini TTL ile önbellekten çözer.
     pub async fn resolve_b2bua_addr(&self, hostname: &str) -> Result<SocketAddr> {
         let mut cache = self.b2bua_cache.lock().await;
         let now = Instant::now();
@@ -59,10 +57,12 @@ pub struct SipServer {
 }
 
 impl SipServer {
+    // --- DÜZELTME: Fonksiyon imzası 4 argüman alacak şekilde güncellendi ---
     pub async fn new(
         config: Arc<AppConfig>,
         clients: Arc<Mutex<InternalClients>>,
         state: Arc<ProxyState>,
+        redis: RedisConn, // Redis bağlantısını burada kabul et
     ) -> Result<Self> {
         let bind_addr = format!("{}:{}", config.sip_bind_ip, config.sip_port);
         let transport = SipTransport::new(&bind_addr).await?;
@@ -70,7 +70,8 @@ impl SipServer {
         Ok(Self {
             config: config.clone(),
             transport: Arc::new(transport),
-            engine: ProxyEngine::new(clients, config, state),
+            // --- DÜZELTME: Redis bağlantısını Engine'e ilet ---
+            engine: ProxyEngine::new(clients, config, state, redis),
         })
     }
 
@@ -104,11 +105,9 @@ impl SipServer {
                                                 error!("SIP paketi gönderilemedi {}: {}", dest, e);
                                             }
                                         }
-                                        // target_addr_opt None ise, yanıt gerekmiyor demektir.
                                     }
                                 },
                                 Err(e) => {
-                                    // Keep-alive veya boş paketleri görmezden gel
                                     if len > 4 {
                                         warn!("Hatalı SIP paketi {}: {}", src_addr, e);
                                     }

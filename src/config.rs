@@ -8,26 +8,23 @@ pub struct AppConfig {
     pub grpc_listen_addr: SocketAddr,
     pub http_listen_addr: SocketAddr,
     
-    // SIP Network
     pub sip_bind_ip: String,
     pub sip_port: u16,
     pub proxy_advertised_host: String,
     
-    // Internal Service Targets (gRPC)
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
     pub dialplan_grpc_url: String,
+    pub redis_url: String,
 
-    // Routing Targets (SIP Forwarding Destinations)
-    pub b2bua_sip_addr: String,     // INVITE'lar için
-    pub registrar_sip_addr: String, // REGISTER'lar için
-    pub probe_sip_addr: String,     // YENİ: Test/Probe için (9998)
+    pub b2bua_sip_addr: String,
+    pub registrar_sip_addr: String,
+    pub probe_sip_addr: String,
     
     pub env: String,
     pub rust_log: String,
     pub service_version: String,
     
-    // TLS
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
@@ -59,19 +56,19 @@ impl AppConfig {
             dialplan_grpc_url: env::var("DIALPLAN_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://dialplan-service:12021".to_string()),
             
-            // [SIP HEDEFLERİ]
+            redis_url: env::var("REDIS_URL").context("ZORUNLU: REDIS_URL eksik")?,
+
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET")
                 .context("ZORUNLU: B2BUA_SERVICE_SIP_TARGET eksik")?,
             registrar_sip_addr: env::var("REGISTRAR_SERVICE_SIP_TARGET")
                 .unwrap_or_else(|_| "proxy-service:13074".to_string()),
             
-            // YENİ: Probe Adresi (Opsiyonel default verilebilir)
             probe_sip_addr: env::var("PROBE_SERVICE_SIP_TARGET")
                 .unwrap_or_else(|_| "sip-probe:13024".to_string()),
             
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.1.0".to_string()),
+            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.2.0".to_string()),
             
             cert_path: env::var("PROXY_SERVICE_CERT_PATH").context("ZORUNLU: PROXY_SERVICE_CERT_PATH eksik")?,
             key_path: env::var("PROXY_SERVICE_KEY_PATH").context("ZORUNLU: PROXY_SERVICE_KEY_PATH eksik")?,

@@ -60,23 +60,30 @@ impl App {
         let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
 
-        // 1. Paylaşılan Durum ve gRPC İstemcilerini Başlat
+        // 1. Redis Bağlantısı
+        info!("Redis'e bağlanılıyor: {}", self.config.redis_url);
+        let redis_client = redis::Client::open(self.config.redis_url.as_str())
+            .context("Redis URL hatalı")?;
+        let redis_conn = redis_client.get_multiplexed_async_connection().await
+            .context("Redis bağlantısı kurulamadı")?;
+        let redis_conn = Arc::new(Mutex::new(redis_conn));
+        
+        // 2. Paylaşılan Durum ve gRPC İstemcileri
         let clients = Arc::new(Mutex::new(InternalClients::connect(&self.config).await?));
         let state = Arc::new(ProxyState::new()); 
 
-        // 2. SIP Sunucusunu Başlat
+        // 3. SIP Sunucusunu Başlat
         let sip_config = self.config.clone();
-        let sip_server = SipServer::new(sip_config, clients.clone(), state).await?;
+        // --- DÜZELTME: Artık 4 argüman doğru sırada ---
+        let sip_server = SipServer::new(sip_config, clients.clone(), state, redis_conn).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
         });
 
-        // 3. gRPC Sunucusunu Başlat
+        // 4. gRPC Sunucusunu Başlat
         let grpc_config = self.config.clone();
         let grpc_server_handle = tokio::spawn(async move {
             let tls_config = load_server_tls_config(&grpc_config).await.expect("TLS hatası");
-            
-            // DÜZELTME: Config servise enjekte ediliyor.
             let grpc_service = MyProxyService::new(grpc_config.clone()); 
             
             info!(address = %grpc_config.grpc_listen_addr, "gRPC sunucusu başlatılıyor...");
@@ -91,7 +98,7 @@ impl App {
                 .context("gRPC sunucusu çöktü")
         });
 
-        // 4. HTTP Sunucusunu Başlat
+        // 5. HTTP Sunucusunu Başlat
         let http_config = self.config.clone();
         let http_server_handle = tokio::spawn(async move {
             let addr = http_config.http_listen_addr;

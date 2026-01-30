@@ -4,19 +4,24 @@ use crate::config::AppConfig;
 use crate::grpc::client::InternalClients;
 use crate::sip::server::ProxyState;
 use crate::sip::utils;
-use sentiric_contracts::sentiric::dialplan::v1::ResolveDialplanRequest;
-use sentiric_contracts::sentiric::sip::v1::{LookupContactRequest, RegisterRequest};
+// DÜZELTME: Kullanılmayan `LookupContactRequest` kaldırıldı.
+use sentiric_contracts::sentiric::sip::v1::RegisterRequest;
 use sentiric_sip_core::{utils as sip_core_utils, Header, HeaderName, Method, SipPacket};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{error, info, instrument, warn};
+use redis::AsyncCommands;
+
+// Redis Connection Tipi
+pub type RedisConn = Arc<Mutex<redis::aio::MultiplexedConnection>>;
 
 pub struct ProxyEngine {
     clients: Arc<Mutex<InternalClients>>,
     config: Arc<AppConfig>,
     state: Arc<ProxyState>,
+    redis: RedisConn,
 }
 
 impl ProxyEngine {
@@ -24,12 +29,9 @@ impl ProxyEngine {
         clients: Arc<Mutex<InternalClients>>,
         config: Arc<AppConfig>,
         state: Arc<ProxyState>,
+        redis: RedisConn,
     ) -> Self {
-        Self {
-            clients,
-            config,
-            state,
-        }
+        Self { clients, config, state, redis }
     }
 
     #[instrument(skip(self, packet), fields(method = %packet.method, call_id = %utils::get_header(packet, HeaderName::CallId)))]
@@ -38,221 +40,106 @@ impl ProxyEngine {
         packet: &mut SipPacket,
         src_addr: SocketAddr,
     ) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // [TRACE]
-        info!("🔫 [TRACE-PROXY] Paket Alındı. Method: {}, Src: {}", packet.method, src_addr);
-
         if packet.is_request {
             match packet.method {
-                Method::Register => {
-                    if let Some(resp) = self.handle_register(packet, src_addr).await {
-                        return Some((resp, Some(src_addr)));
-                    }
-                    None
-                }
+                Method::Register => self.handle_register(packet, src_addr).await,
                 Method::Invite => self.handle_invite(packet, src_addr).await,
-                _ => self.handle_passthrough_request(packet).await,
+                _ => self.handle_in_dialog_request(packet).await,
             }
         } else {
             self.handle_response(packet).await
         }
     }
 
-    async fn handle_register(&self, packet: &SipPacket, src_addr: SocketAddr) -> Option<SipPacket> {
+    async fn handle_register(&self, packet: &SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         let to_header = utils::get_header(packet, HeaderName::To);
-        let contact_header = utils::get_header(packet, HeaderName::Contact);
         let aor = sip_core_utils::extract_aor(&to_header);
-        let username = self
-            .extract_username_from_uri(&aor)
-            .unwrap_or_else(|| "unknown".to_string());
-
+        let username = self.extract_username_from_uri(&aor).unwrap_or_else(|| "unknown".to_string());
         let real_contact_uri = format!("sip:{}@{}:{}", username, src_addr.ip(), src_addr.port());
-        info!(
-            "REGISTER (NAT Fixed): AOR='{}', Claimed='{}', Actual='{}'",
-            aor, contact_header, real_contact_uri
-        );
 
         let mut clients = self.clients.lock().await;
-        let req = Request::new(RegisterRequest {
-            sip_uri: aor,
-            contact_uri: real_contact_uri,
-            expires: 3600,
-        });
+        let req = Request::new(RegisterRequest { sip_uri: aor, contact_uri: real_contact_uri, expires: 3600 });
 
         match clients.registrar.register(req).await {
-            Ok(_) => {
-                info!("Registrar: Kayıt başarılı.");
-                Some(self.create_response(packet, 200, "OK"))
-            }
-            Err(e) => {
-                error!(error = %e, "Registrar hatası");
-                Some(self.create_response(packet, 500, "Internal Server Error"))
-            }
+            Ok(_) => Some((self.create_response(packet, 200, "OK"), Some(src_addr))),
+            Err(_) => Some((self.create_response(packet, 500, "Internal Server Error"), Some(src_addr))),
         }
     }
 
-    async fn handle_invite(
-        &self,
-        packet: &mut SipPacket,
-        src_addr: SocketAddr,
-    ) -> Option<(SipPacket, Option<SocketAddr>)> {
-        let b2bua_addr = match self.state.resolve_b2bua_addr(&self.config.b2bua_sip_addr).await {
-            Ok(addr) => addr,
-            Err(e) => {
-                error!(error = %e, "KRİTİK: B2BUA adresi çözümlenemedi.");
-                return Some((self.create_response(packet, 503, "Service Unavailable"), Some(src_addr)));
-            }
-        };
-
-        if src_addr.ip() == b2bua_addr.ip() {
-            if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
-                info!("🔄 Outbound INVITE: B2BUA -> {}", target_addr);
-                self.add_via_header(packet);
-                return Some((packet.clone(), Some(target_addr)));
-            }
-            error!("❌ Outbound INVITE hedef adresi çözülemedi: {}", packet.uri);
-            return None;
-        }
-
+    async fn handle_invite(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
+        let call_id = utils::get_header(packet, HeaderName::CallId);
+        let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
         let to = utils::get_header(packet, HeaderName::To);
-        let callee_aor = sip_core_utils::extract_aor(&to);
-        let callee_username = self.extract_username_from_uri(&callee_aor).unwrap_or_default();
+        let callee_username = self.extract_username_from_uri(&sip_core_utils::extract_aor(&to)).unwrap_or_default();
 
-        // 9998 PROBE CHECK
-        if callee_username == "9998" {
-            info!("🔫 [TRACE-PROXY] Numara 9998 tespit edildi. Probe hedefi aranıyor: {}", self.config.probe_sip_addr);
-            
-            let probe_addr = match self.state.resolve_b2bua_addr(&self.config.probe_sip_addr).await {
-                Ok(addr) => addr,
-                Err(e) => {
-                    error!(error = %e, "KRİTİK: Probe adresi çözümlenemedi.");
-                    return Some((self.create_response(packet, 503, "Probe Unavailable"), Some(src_addr)));
-                }
-            };
-            
-            info!("🔫 [TRACE-PROXY] Yönlendirme Kararı: PROBE -> {}", probe_addr);
-            self.add_via_header(packet);
-            return Some((packet.clone(), Some(probe_addr)));
-        }
-
-        // B2BUA Logic
-        let from = utils::get_header(packet, HeaderName::From);
-        let caller_aor = sip_core_utils::extract_aor(&from);
-        let caller = self.extract_username_from_uri(&caller_aor).unwrap_or(caller_aor);
-
-        info!("➡️ Inbound INVITE: {} -> {}", caller, callee_username);
-
-        let dialplan_result = {
-            let mut clients = self.clients.lock().await;
-            clients
-                .dialplan
-                .resolve_dialplan(Request::new(ResolveDialplanRequest {
-                    caller_contact_value: caller,
-                    destination_number: callee_username.clone(), 
-                }))
-                .await
-        };
-
-        match dialplan_result {
-            Ok(response) => {
-                let resp = response.into_inner();
-                let action = resp.action.map(|a| a.action).unwrap_or_default();
-                info!("🧠 Dialplan Kararı: '{}' (PlanID: {})", action, resp.dialplan_id);
-
-                match action.as_str() {
-                    "BRIDGE_CALL" => self.route_to_internal_peer(packet, &callee_aor, src_addr).await,
-                    "START_AI_CONVERSATION" | "PROCESS_GUEST_CALL" | "PLAY_ANNOUNCEMENT" => {
-                        info!("🤖 AI Routing: Çağrı B2BUA'ya yönlendiriliyor. ({})", b2bua_addr);
-                        self.add_via_header(packet);
-                        Some((packet.clone(), Some(b2bua_addr)))
-                    }
-                    _ => {
-                        warn!("⚠️ Bilinmeyen Dialplan Aksiyonu: {}", action);
-                        Some((self.create_response(packet, 501, "Not Implemented"), Some(src_addr)))
-                    }
-                }
-            }
-            Err(e) => {
-                error!(error = %e, "Dialplan servisi hatası");
-                Some((self.create_response(packet, 503, "Dialplan Service Unavailable"), Some(src_addr)))
-            }
-        }
-    }
-
-    async fn route_to_internal_peer(&self, packet: &mut SipPacket, callee_aor: &str, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
-        let lookup_result = {
-            let mut clients = self.clients.lock().await;
-            clients
-                .registrar
-                .lookup_contact(Request::new(LookupContactRequest {
-                    sip_uri: callee_aor.to_string(),
-                }))
-                .await
-        };
-
-        match lookup_result {
-            Ok(lookup_resp) => {
-                let contacts = lookup_resp.into_inner().contact_uris;
-                if !contacts.is_empty() {
-                    let contact_uri = &contacts[0];
-                    if let Some(target_addr) = self.extract_target_addr(contact_uri) {
-                        if target_addr == src_addr {
-                            warn!("⚠️ Loop Detected: Hedef ({}) ile Kaynak ({}) aynı.", target_addr, src_addr);
-                            return Some((self.create_response(packet, 482, "Loop Detected"), Some(src_addr)));
-                        }
-                        info!("✅ Dahili Yönlendirme (Bridge): {} -> {}", callee_aor, target_addr);
-                        self.add_via_header(packet);
-                        return Some((packet.clone(), Some(target_addr)));
-                    }
-                    warn!("❌ Geçersiz contact URI: {}", contact_uri);
-                    Some((self.create_response(packet, 404, "User Found But Unreachable"), Some(src_addr)))
-                } else {
-                    warn!("❌ Dialplan BRIDGE dedi ama abone ({}) kayıtlı değil.", callee_aor);
-                    Some((self.create_response(packet, 404, "User Not Found"), Some(src_addr)))
-                }
-            }
-            Err(e) => {
-                error!(error = %e, "Registrar hatası");
-                Some((self.create_response(packet, 500, "Internal Server Error"), Some(src_addr)))
-            }
-        }
-    }
-
-    async fn handle_passthrough_request(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
-        if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
-            debug!("➡️ Passthrough Request ({}) -> {}", packet.method, target_addr);
-            self.add_via_header(packet);
-            Some((packet.clone(), Some(target_addr)))
+        let target_host = if callee_username == "9998" {
+            info!("🎯 [PROXY] Yönlendirme Kararı (INVITE): PROBE");
+            &self.config.probe_sip_addr
         } else {
-            error!("❌ Passthrough isteği için hedef URI çözülemedi: {}", packet.uri);
+            info!("🎯 [PROXY] Yönlendirme Kararı (INVITE): B2BUA (Default)");
+            &self.config.b2bua_sip_addr
+        };
+
+        match self.state.resolve_b2bua_addr(target_host).await {
+            Ok(target_addr) => {
+                let redis_key = format!("proxy:route:{}:{}", call_id, from_tag);
+                let mut conn = self.redis.lock().await;
+                let _: redis::RedisResult<()> = conn.set_ex(redis_key.clone(), target_addr.to_string(), 300).await;
+                info!("💾 [PROXY-STATE] Cache SET: {} -> {}", redis_key, target_addr);
+
+                self.add_via_header(packet);
+                Some((packet.clone(), Some(target_addr)))
+            }
+            Err(e) => {
+                error!("❌ Hedef çözümlenemedi: {}: {}", target_host, e);
+                Some((self.create_response(packet, 503, "Service Unavailable"), Some(src_addr)))
+            }
+        }
+    }
+
+    async fn handle_in_dialog_request(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
+        let call_id = utils::get_header(packet, HeaderName::CallId);
+        let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
+        let redis_key = format!("proxy:route:{}:{}", call_id, from_tag);
+        let mut conn = self.redis.lock().await;
+
+        match conn.get::<_, String>(redis_key.clone()).await {
+            Ok(target_str) => {
+                if let Ok(target_addr) = target_str.parse::<SocketAddr>() {
+                    info!("✅ [PROXY-STATE] CACHE HIT: {} -> {}", redis_key, target_addr);
+                    self.add_via_header(packet);
+                    return Some((packet.clone(), Some(target_addr)));
+                }
+            }
+            Err(_) => {
+                warn!("⚠️ [PROXY-STATE] CACHE MISS: {}. Varsayılan hedefe yönlendiriliyor.", redis_key);
+            }
+        }
+
+        if let Ok(b2bua_addr) = self.state.resolve_b2bua_addr(&self.config.b2bua_sip_addr).await {
+            self.add_via_header(packet);
+            Some((packet.clone(), Some(b2bua_addr)))
+        } else {
             None
         }
     }
-
+    
     async fn handle_response(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
         if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
             packet.headers.remove(0);
         } else {
-            warn!("Via başlığı olmayan response paketi yönlendirilemiyor.");
             return None;
         }
-
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = self.parse_via_address(&next_via.value) {
-                // [TRACE]
-                info!("🔫 [TRACE-PROXY] Yanıt Yönlendirme (Response) -> {}", target);
                 return Some((packet.clone(), Some(target)));
             }
         }
-        warn!("Response için sonraki hop bulunamadı.");
         None
     }
 
     fn add_via_header(&self, packet: &mut SipPacket) {
-        let via_header = sentiric_sip_core::builder::build_via_header(
-            &self.config.proxy_advertised_host,
-            self.config.sip_port,
-            "UDP",
-        );
+        let via_header = sentiric_sip_core::builder::build_via_header(&self.config.proxy_advertised_host, self.config.sip_port, "UDP");
         packet.headers.insert(0, via_header);
     }
 
@@ -274,43 +161,34 @@ impl ProxyEngine {
         Some(clean[..end_idx].to_string())
     }
 
-    fn extract_target_addr(&self, uri: &str) -> Option<SocketAddr> {
-        let clean = uri.trim_start_matches("sip:").trim_start_matches('<').trim_end_matches('>');
-        let host_port_part = clean.find('@').map_or(clean, |at_idx| &clean[at_idx + 1..]);
-        let host_port = host_port_part.find(';').map_or(host_port_part, |semi_idx| &host_port_part[..semi_idx]);
-        
-        if !host_port.contains(':') {
-            format!("{}:5060", host_port).parse().ok()
-        } else {
-            host_port.parse().ok()
+    fn extract_tag_from_header(&self, header_val: &str) -> String {
+        if let Some(tag_start) = header_val.find(";tag=") {
+            let rest = &header_val[tag_start + 5..];
+            if let Some(tag_end) = rest.find(';') {
+                return rest[..tag_end].to_string();
+            }
+            return rest.to_string();
         }
+        String::new()
     }
     
     fn parse_via_address(&self, via_val: &str) -> Option<SocketAddr> {
         let parts: Vec<&str> = via_val.split_whitespace().collect();
         if parts.len() < 2 { return None; }
-
         let params: Vec<&str> = parts[1].split(';').collect();
         let mut host_port = params[0].to_string();
         let mut rport: Option<&str> = None;
         let mut received: Option<&str> = None;
-
         for param in &params[1..] {
             if let Some((k, v)) = param.split_once('=') {
                 if k == "received" { received = Some(v); }
                 if k == "rport" { rport = Some(v); }
             }
         }
-        
         if let (Some(rec), Some(rp)) = (received, rport) {
-            if let Ok(addr) = format!("{}:{}", rec, rp).parse() {
-                return Some(addr);
-            }
+            if let Ok(addr) = format!("{}:{}", rec, rp).parse() { return Some(addr); }
         }
-
-        if !host_port.contains(':') {
-            host_port = format!("{}:5060", host_port);
-        }
+        if !host_port.contains(':') { host_port = format!("{}:5060", host_port); }
         host_port.parse().ok()
     }
 }
