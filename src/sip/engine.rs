@@ -12,7 +12,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
 use tracing::{debug, error, info, instrument, warn};
-// use uuid::Uuid;
 
 pub struct ProxyEngine {
     clients: Arc<Mutex<InternalClients>>,
@@ -33,18 +32,19 @@ impl ProxyEngine {
         }
     }
 
-    /// Gelen SIP paketlerini işler ve (Yanıt Paketi, Hedef Adres) döndürür.
-    #[instrument(skip(self, packet), fields(method = %packet.method, is_request = packet.is_request, call_id = %utils::get_header(packet, HeaderName::CallId)))]
+    #[instrument(skip(self, packet), fields(method = %packet.method, call_id = %utils::get_header(packet, HeaderName::CallId)))]
     pub async fn process_packet(
         &self,
         packet: &mut SipPacket,
         src_addr: SocketAddr,
     ) -> Option<(SipPacket, Option<SocketAddr>)> {
+        // [TRACE]
+        info!("🔫 [TRACE-PROXY] Paket Alındı. Method: {}, Src: {}", packet.method, src_addr);
+
         if packet.is_request {
             match packet.method {
                 Method::Register => {
                     if let Some(resp) = self.handle_register(packet, src_addr).await {
-                        // REGISTER yanıtı her zaman isteğin geldiği kaynağa geri döner.
                         return Some((resp, Some(src_addr)));
                     }
                     None
@@ -53,12 +53,10 @@ impl ProxyEngine {
                 _ => self.handle_passthrough_request(packet).await,
             }
         } else {
-            // Yanıtlar her zaman Via başlığına göre yönlendirilir.
             self.handle_response(packet).await
         }
     }
 
-    /// REGISTER isteklerini işler, NAT'ı düzeltir ve registrar servisine iletir.
     async fn handle_register(&self, packet: &SipPacket, src_addr: SocketAddr) -> Option<SipPacket> {
         let to_header = utils::get_header(packet, HeaderName::To);
         let contact_header = utils::get_header(packet, HeaderName::Contact);
@@ -67,7 +65,6 @@ impl ProxyEngine {
             .extract_username_from_uri(&aor)
             .unwrap_or_else(|| "unknown".to_string());
 
-        // NAT Traversal: Contact header'daki adresi, paketin geldiği gerçek IP ve port ile değiştir.
         let real_contact_uri = format!("sip:{}@{}:{}", username, src_addr.ip(), src_addr.port());
         info!(
             "REGISTER (NAT Fixed): AOR='{}', Claimed='{}', Actual='{}'",
@@ -93,13 +90,11 @@ impl ProxyEngine {
         }
     }
 
-    /// INVITE isteklerini, kaynağına ve dialplan sonucuna göre akıllıca yönlendirir.
     async fn handle_invite(
         &self,
         packet: &mut SipPacket,
         src_addr: SocketAddr,
     ) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // B2BUA adresini cache'den veya DNS'ten al
         let b2bua_addr = match self.state.resolve_b2bua_addr(&self.config.b2bua_sip_addr).await {
             Ok(addr) => addr,
             Err(e) => {
@@ -108,7 +103,6 @@ impl ProxyEngine {
             }
         };
 
-        // Outbound Çağrı: Paket B2BUA'dan geliyorsa, hedef URI'a yönlendirilir.
         if src_addr.ip() == b2bua_addr.ip() {
             if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
                 info!("🔄 Outbound INVITE: B2BUA -> {}", target_addr);
@@ -123,14 +117,10 @@ impl ProxyEngine {
         let callee_aor = sip_core_utils::extract_aor(&to);
         let callee_username = self.extract_username_from_uri(&callee_aor).unwrap_or_default();
 
-        // -------------------------------------------------------------
-        // 🔥 YENİ: PROBE / TEST NUMARASI YÖNLENDİRMESİ
-        // 9998 aranırsa, trafiği sip-probe servisine yönlendir.
-        // -------------------------------------------------------------
+        // 9998 PROBE CHECK
         if callee_username == "9998" {
-            info!("🧪 PROBE TEST: Çağrı sip-probe servisine yönlendiriliyor -> {}", self.config.probe_sip_addr);
+            info!("🔫 [TRACE-PROXY] Numara 9998 tespit edildi. Probe hedefi aranıyor: {}", self.config.probe_sip_addr);
             
-            // Probe adresini çözümle (Consul DNS üzerinden)
             let probe_addr = match self.state.resolve_b2bua_addr(&self.config.probe_sip_addr).await {
                 Ok(addr) => addr,
                 Err(e) => {
@@ -139,12 +129,12 @@ impl ProxyEngine {
                 }
             };
             
+            info!("🔫 [TRACE-PROXY] Yönlendirme Kararı: PROBE -> {}", probe_addr);
             self.add_via_header(packet);
             return Some((packet.clone(), Some(probe_addr)));
         }
-        // -------------------------------------------------------------
 
-        // Normal Inbound Çağrı: Paket dış dünyadan geliyorsa, dialplan'e sorulur.
+        // B2BUA Logic
         let from = utils::get_header(packet, HeaderName::From);
         let caller_aor = sip_core_utils::extract_aor(&from);
         let caller = self.extract_username_from_uri(&caller_aor).unwrap_or(caller_aor);
@@ -157,7 +147,7 @@ impl ProxyEngine {
                 .dialplan
                 .resolve_dialplan(Request::new(ResolveDialplanRequest {
                     caller_contact_value: caller,
-                    destination_number: callee_username.clone(), // Clone gerekli olabilir
+                    destination_number: callee_username.clone(), 
                 }))
                 .await
         };
@@ -188,7 +178,6 @@ impl ProxyEngine {
         }
     }
 
-    /// Dahili bir aboneye yönlendirme mantığı.
     async fn route_to_internal_peer(&self, packet: &mut SipPacket, callee_aor: &str, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         let lookup_result = {
             let mut clients = self.clients.lock().await;
@@ -228,7 +217,6 @@ impl ProxyEngine {
         }
     }
 
-    /// ACK, BYE gibi diyalog içi istekleri hedeflerine yönlendirir.
     async fn handle_passthrough_request(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
         if let Some(target_addr) = self.extract_target_addr(&packet.uri) {
             debug!("➡️ Passthrough Request ({}) -> {}", packet.method, target_addr);
@@ -240,9 +228,7 @@ impl ProxyEngine {
         }
     }
 
-    /// Gelen yanıtları, Via başlık zincirine göre bir önceki hop'a geri gönderir.
     async fn handle_response(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // 1. Kendi Via başlığımızı paketten çıkar.
         if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
             packet.headers.remove(0);
         } else {
@@ -250,10 +236,10 @@ impl ProxyEngine {
             return None;
         }
 
-        // 2. Zincirdeki bir sonraki (artık ilk sıradaki) Via başlığına bakarak hedefi bul.
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = self.parse_via_address(&next_via.value) {
-                debug!("↩️ Yönlendirme Yanıtı ({}) -> {}", packet.status_code, target);
+                // [TRACE]
+                info!("🔫 [TRACE-PROXY] Yanıt Yönlendirme (Response) -> {}", target);
                 return Some((packet.clone(), Some(target)));
             }
         }
@@ -261,7 +247,6 @@ impl ProxyEngine {
         None
     }
 
-    /// Pakete kendi Via başlığımızı ekler.
     fn add_via_header(&self, packet: &mut SipPacket) {
         let via_header = sentiric_sip_core::builder::build_via_header(
             &self.config.proxy_advertised_host,
@@ -271,7 +256,6 @@ impl ProxyEngine {
         packet.headers.insert(0, via_header);
     }
 
-    /// Standart bir SIP yanıt paketi oluşturur.
     fn create_response(&self, req: &SipPacket, code: u16, reason: &str) -> SipPacket {
         let mut resp = SipPacket::new_response(code, reason.to_string());
         for h in &req.headers {
@@ -284,14 +268,12 @@ impl ProxyEngine {
         resp
     }
 
-    /// URI'dan kullanıcı adını (örn: "1001") çıkarır.
     fn extract_username_from_uri(&self, uri: &str) -> Option<String> {
         let clean = uri.trim_start_matches('<').trim_start_matches("sip:");
         let end_idx = clean.find('@').or_else(|| clean.find(':')).unwrap_or(clean.len());
         Some(clean[..end_idx].to_string())
     }
 
-    /// SIP URI'dan (örn: "sip:1001@1.2.3.4:5060") hedef `SocketAddr`'ı çıkarır.
     fn extract_target_addr(&self, uri: &str) -> Option<SocketAddr> {
         let clean = uri.trim_start_matches("sip:").trim_start_matches('<').trim_end_matches('>');
         let host_port_part = clean.find('@').map_or(clean, |at_idx| &clean[at_idx + 1..]);
@@ -304,7 +286,6 @@ impl ProxyEngine {
         }
     }
     
-    /// Via başlığından (rport/received ile) gerçek adresi çözer.
     fn parse_via_address(&self, via_val: &str) -> Option<SocketAddr> {
         let parts: Vec<&str> = via_val.split_whitespace().collect();
         if parts.len() < 2 { return None; }
