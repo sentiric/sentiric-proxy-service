@@ -1,8 +1,13 @@
-# 🛡️ Sentiric Proxy Service - Mantık Mimarisi (Final)
+# 🛡️ Sentiric Proxy Service - Mantık Mimarisi (Nihai)
 
-**Rol:** Platformun Trafik Polisi. Stateless (Durumsuz) Sinyalleşme Yönlendiricisi.
+**Rol:** Platformun Trafik Polisi. Sinyalleşme Yönlendiricisi.
 
-## 1. Karar Matriksi (Routing Logic)
+## 1. Durumluluk Derecesi
+Proxy, SIP işlemlerini (Transactions) Redis üzerinde takip ederek **"Transaction-Stateful"** çalışır. 
+
+*   **Önemli:** Proxy, SBC'nin aksine sesi kendi üzerinden geçirmez. Ancak yönlendirme kararını verirken çağrının bacaklarını (Leg A ve Leg B) birbiriyle ilişkilendirmek için Redis'teki durum bilgisini kullanır.
+
+## 2. Karar Matriksi (Routing Logic)
 
 Proxy, gelen her `INVITE` paketi için şu sırayı izler:
 
@@ -24,7 +29,7 @@ Proxy, gelen her `INVITE` paketi için şu sırayı izler:
 4.  **AI Yönlendirme (Core):**
     *   Paketi `b2bua-service`'e yönlendir. (Medya sunucu üzerinden akar).
 
-## 2. Akış Diyagramı
+## 3. Akış Diyagramı
 
 ```mermaid
 graph TD
