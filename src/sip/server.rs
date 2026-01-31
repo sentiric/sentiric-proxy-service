@@ -12,7 +12,7 @@ use tokio::net::lookup_host;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-// --- DÜZELTME: Sabit public yapıldı ---
+// Sabit public yapıldı
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
 #[derive(Default)]
@@ -32,6 +32,11 @@ impl ProxyState {
     }
 
     pub async fn resolve_b2bua_addr(&self, hostname: &str) -> Result<SocketAddr> {
+        // Eğer hostname zaten IP:Port formatındaysa DNS'e gitme
+        if let Ok(addr) = hostname.parse::<SocketAddr>() {
+            return Ok(addr);
+        }
+
         let mut cache = self.b2bua_cache.lock().await;
         let now = Instant::now();
 
@@ -95,6 +100,13 @@ impl SipServer {
                 res = socket.recv_from(&mut buf) => {
                     match res {
                         Ok((len, src_addr)) => {
+                            if len < 4 { continue; }
+                            
+                            // Keep-alive (CRLF) filtresi
+                            if len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n') {
+                                continue;
+                            }
+
                             let data = &buf[..len];
 
                             match parser::parse(data) {
