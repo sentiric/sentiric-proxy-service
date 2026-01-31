@@ -85,7 +85,6 @@ impl ProxyEngine {
         let aor = sip_core_utils::extract_aor(&to_header);
         let username = sip_core_utils::extract_username_from_uri(&aor);
         
-        // Kütüphane ile hedef çözümleme
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
         
@@ -109,7 +108,6 @@ impl ProxyEngine {
         let to_aor = sip_core_utils::extract_aor(&utils::get_header(packet, HeaderName::To));
         let callee_username = sip_core_utils::extract_username_from_uri(&to_aor);
         
-        // Kütüphane ile hedef çözümleme
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
 
@@ -208,7 +206,6 @@ impl ProxyEngine {
             Err(_) => {
                 warn!("⚠️ [PROXY-STATE] CACHE MISS. Via'dan fallback.");
                 if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
-                    // Kütüphane ile çözümle
                     return SipRouter::resolve_response_target(&next_via.value, DEFAULT_SIP_PORT)
                         .map(|target| (packet.clone(), Some(target)));
                 }
@@ -218,24 +215,19 @@ impl ProxyEngine {
     }
     
     fn add_via_header(&self, packet: &mut SipPacket) {
-        // Kütüphane Kullanımı
         let via_header = SipRouter::build_via(&self.config.proxy_advertised_host, self.config.sip_port, "UDP");
         packet.headers.insert(0, via_header);
     }
     
     fn add_record_route(&self, packet: &mut SipPacket) {
-        // Kütüphane Kullanımı
         let rr_header = SipRouter::build_record_route(&self.config.proxy_advertised_host, self.config.sip_port);
         packet.headers.insert(0, rr_header);
     }
 
     fn create_response(&self, req: &SipPacket, code: u16, reason: &str) -> SipPacket {
-        let mut resp = SipPacket::new_response(code, reason.to_string());
-        for h in &req.headers {
-            if matches!(h.name, HeaderName::Via | HeaderName::From | HeaderName::To | HeaderName::CallId | HeaderName::CSeq) {
-                resp.headers.push(h.clone());
-            }
-        }
+        // REFACTOR: Core fonksiyon kullanımı
+        let mut resp = SipPacket::create_response_for(req, code, reason.to_string());
+        
         resp.headers.push(Header::new(HeaderName::Server, "Sentiric/1.1 Stateful Proxy".to_string()));
         resp.headers.push(Header::new(HeaderName::ContentLength, "0".to_string()));
         resp
