@@ -5,10 +5,12 @@ use crate::grpc::client::InternalClients;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::utils;
 use sentiric_contracts::sentiric::sip::v1::RegisterRequest;
+// ? #[warn(unused_imports)]
+use sentiric_contracts::sentiric::sip::v1::b2bua_service_client::B2buaServiceClient;
 use sentiric_sip_core::{
     utils as sip_core_utils, 
     Header, HeaderName, Method, SipPacket,
-    SipRouter // YENİ
+    SipRouter 
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -111,6 +113,8 @@ impl ProxyEngine {
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
 
+        // 1. Dialplan & Action Logic (Basitleştirilmiş)
+        // Eğer 9998 ise Probe, değilse B2BUA.
         let target_host = if callee_username == "9998" {
             info!("🎯 [PROXY-ROUTE] INVITE -> PROBE (9998)");
             &self.config.probe_sip_addr
@@ -127,6 +131,7 @@ impl ProxyEngine {
             }
         };
 
+        // 2. State Kaydı (Redis)
         let client_leg_key = format!("proxy:route:{}:{}", call_id, from_tag);
         let target_leg_key_placeholder = format!("proxy:route:{}:{}", call_id, "callee");
 
@@ -135,13 +140,17 @@ impl ProxyEngine {
         let _: () = conn.set_ex(&target_leg_key_placeholder, target_addr.to_string(), 300).await.unwrap_or_default();
         debug!("💾 [PROXY-STATE] CACHE SET (Leg A): {} -> {}", client_leg_key, client_addr);
         
-        self.add_record_route(packet);
-        self.add_via_header(packet);
+        // 3. Header Manipülasyonu (Core Kullanımı)
+        // Proxy, stateful olduğu için Record-Route ekler.
+        SipRouter::add_record_route(packet, &self.config.proxy_advertised_host, self.config.sip_port);
+        // Proxy kendini Via stack'ine ekler.
+        SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
 
         Some((packet.clone(), Some(target_addr)))
     }
 
     async fn handle_in_dialog_request(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
+        // Loose Routing: Route header varsa onu tüket
         if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Route {
              packet.headers.remove(0);
         }
@@ -149,6 +158,7 @@ impl ProxyEngine {
         let call_id = utils::get_header(packet, HeaderName::CallId);
         let to_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::To));
 
+        // Hedef neresi? Redis'ten bak.
         let target_redis_key = if !to_tag.is_empty() {
             format!("proxy:route:{}:{}", call_id, to_tag)
         } else {
@@ -160,7 +170,10 @@ impl ProxyEngine {
             Ok(target_str) => {
                 if let Ok(target_addr) = target_str.parse() {
                     debug!("✅ [PROXY-STATE] CACHE HIT: {} -> {}", target_redis_key, target_addr);
-                    self.add_via_header(packet);
+                    
+                    // In-dialog istekler için de Via eklenmeli (yanıtın geri dönebilmesi için)
+                    SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
+                    
                     Some((packet.clone(), Some(target_addr)))
                 } else {
                     warn!("⚠️ [PROXY-STATE] CACHE HATA: Geçersiz adres: {}", target_str);
@@ -175,16 +188,17 @@ impl ProxyEngine {
     }
     
     async fn handle_response(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
-        if packet.headers.is_empty() || packet.headers[0].name != HeaderName::Via {
+        // [REFACTOR] Core kullanımı: strip_top_via
+        if SipRouter::strip_top_via(packet).is_none() {
             warn!("⚠️ [PROXY-HANDLE] Yanıt paketinde Via başlığı bulunamadı.");
             return None;
         }
-        packet.headers.remove(0);
 
         let call_id = utils::get_header(packet, HeaderName::CallId);
         let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
         let to_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::To));
 
+        // Eğer 200 OK ise ve To-tag varsa, "callee" placeholder'ını gerçek tag ile güncelle (Late Binding)
         if packet.status_code >= 200 && !to_tag.is_empty() {
             let old_key = format!("proxy:route:{}:{}", call_id, "callee");
             let new_key = format!("proxy:route:{}:{}", call_id, to_tag);
@@ -192,6 +206,7 @@ impl ProxyEngine {
             let _: redis::RedisResult<()> = conn.rename_nx(&old_key, &new_key).await;
         }
         
+        // Yanıtın gideceği hedefi (Client) bul
         let target_redis_key = format!("proxy:route:{}:{}", call_id, from_tag);
 
         let mut conn = self.redis.lock().await;
@@ -213,21 +228,9 @@ impl ProxyEngine {
             }
         }
     }
-    
-    fn add_via_header(&self, packet: &mut SipPacket) {
-        let via_header = SipRouter::build_via(&self.config.proxy_advertised_host, self.config.sip_port, "UDP");
-        packet.headers.insert(0, via_header);
-    }
-    
-    fn add_record_route(&self, packet: &mut SipPacket) {
-        let rr_header = SipRouter::build_record_route(&self.config.proxy_advertised_host, self.config.sip_port);
-        packet.headers.insert(0, rr_header);
-    }
 
     fn create_response(&self, req: &SipPacket, code: u16, reason: &str) -> SipPacket {
-        // REFACTOR: Core fonksiyon kullanımı
         let mut resp = SipPacket::create_response_for(req, code, reason.to_string());
-        
         resp.headers.push(Header::new(HeaderName::Server, "Sentiric/1.1 Stateful Proxy".to_string()));
         resp.headers.push(Header::new(HeaderName::ContentLength, "0".to_string()));
         resp
