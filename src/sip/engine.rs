@@ -5,8 +5,6 @@ use crate::grpc::client::InternalClients;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::utils;
 use sentiric_contracts::sentiric::sip::v1::RegisterRequest;
-// ? #[warn(unused_imports)]
-use sentiric_contracts::sentiric::sip::v1::b2bua_service_client::B2buaServiceClient;
 use sentiric_sip_core::{
     utils as sip_core_utils, 
     Header, HeaderName, Method, SipPacket,
@@ -90,6 +88,8 @@ impl ProxyEngine {
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
         
+        // Kullanıcının gerçek IP'sini (client_addr) Contact URI olarak kaydediyoruz.
+        // Böylece Proxy, kullanıcıya geri dönebilir.
         let real_contact_uri = format!("sip:{}@{}:{}", username, client_addr.ip(), client_addr.port());
 
         let mut clients = self.clients.lock().await;
@@ -113,8 +113,7 @@ impl ProxyEngine {
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
 
-        // 1. Dialplan & Action Logic (Basitleştirilmiş)
-        // Eğer 9998 ise Probe, değilse B2BUA.
+        // Routing Kararı
         let target_host = if callee_username == "9998" {
             info!("🎯 [PROXY-ROUTE] INVITE -> PROBE (9998)");
             &self.config.probe_sip_addr
@@ -131,26 +130,23 @@ impl ProxyEngine {
             }
         };
 
-        // 2. State Kaydı (Redis)
+        // Redis State Update
         let client_leg_key = format!("proxy:route:{}:{}", call_id, from_tag);
         let target_leg_key_placeholder = format!("proxy:route:{}:{}", call_id, "callee");
 
         let mut conn = self.redis.lock().await;
         let _: () = conn.set_ex(&client_leg_key, client_addr.to_string(), 300).await.unwrap_or_default();
         let _: () = conn.set_ex(&target_leg_key_placeholder, target_addr.to_string(), 300).await.unwrap_or_default();
-        debug!("💾 [PROXY-STATE] CACHE SET (Leg A): {} -> {}", client_leg_key, client_addr);
         
-        // 3. Header Manipülasyonu (Core Kullanımı)
-        // Proxy, stateful olduğu için Record-Route ekler.
+        // --- CORE KULLANIMI ---
         SipRouter::add_record_route(packet, &self.config.proxy_advertised_host, self.config.sip_port);
-        // Proxy kendini Via stack'ine ekler.
         SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
 
         Some((packet.clone(), Some(target_addr)))
     }
 
     async fn handle_in_dialog_request(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // Loose Routing: Route header varsa onu tüket
+        // Loose Routing Logic
         if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Route {
              packet.headers.remove(0);
         }
@@ -158,7 +154,6 @@ impl ProxyEngine {
         let call_id = utils::get_header(packet, HeaderName::CallId);
         let to_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::To));
 
-        // Hedef neresi? Redis'ten bak.
         let target_redis_key = if !to_tag.is_empty() {
             format!("proxy:route:{}:{}", call_id, to_tag)
         } else {
@@ -169,26 +164,21 @@ impl ProxyEngine {
         match conn.get::<_, String>(&target_redis_key).await {
             Ok(target_str) => {
                 if let Ok(target_addr) = target_str.parse() {
-                    debug!("✅ [PROXY-STATE] CACHE HIT: {} -> {}", target_redis_key, target_addr);
-                    
-                    // In-dialog istekler için de Via eklenmeli (yanıtın geri dönebilmesi için)
+                    // --- CORE KULLANIMI ---
                     SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
-                    
                     Some((packet.clone(), Some(target_addr)))
                 } else {
-                    warn!("⚠️ [PROXY-STATE] CACHE HATA: Geçersiz adres: {}", target_str);
                     Some((self.create_response(packet, 500, "Internal Server Error"), Some(src_addr)))
                 }
             }
-            Err(e) => {
-                warn!("⚠️ [PROXY-STATE] CACHE MISS: {}. Hata: {}.", target_redis_key, e);
+            Err(_) => {
                 Some((self.create_response(packet, 481, "Call Does Not Exist"), Some(src_addr)))
             }
         }
     }
     
     async fn handle_response(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // [REFACTOR] Core kullanımı: strip_top_via
+        // --- CORE KULLANIMI ---
         if SipRouter::strip_top_via(packet).is_none() {
             warn!("⚠️ [PROXY-HANDLE] Yanıt paketinde Via başlığı bulunamadı.");
             return None;
@@ -198,7 +188,7 @@ impl ProxyEngine {
         let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
         let to_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::To));
 
-        // Eğer 200 OK ise ve To-tag varsa, "callee" placeholder'ını gerçek tag ile güncelle (Late Binding)
+        // Late Binding (200 OK ile To-Tag eşleşmesi)
         if packet.status_code >= 200 && !to_tag.is_empty() {
             let old_key = format!("proxy:route:{}:{}", call_id, "callee");
             let new_key = format!("proxy:route:{}:{}", call_id, to_tag);
@@ -206,7 +196,6 @@ impl ProxyEngine {
             let _: redis::RedisResult<()> = conn.rename_nx(&old_key, &new_key).await;
         }
         
-        // Yanıtın gideceği hedefi (Client) bul
         let target_redis_key = format!("proxy:route:{}:{}", call_id, from_tag);
 
         let mut conn = self.redis.lock().await;
@@ -219,7 +208,6 @@ impl ProxyEngine {
                 }
             }
             Err(_) => {
-                warn!("⚠️ [PROXY-STATE] CACHE MISS. Via'dan fallback.");
                 if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
                     return SipRouter::resolve_response_target(&next_via.value, DEFAULT_SIP_PORT)
                         .map(|target| (packet.clone(), Some(target)));
@@ -230,6 +218,7 @@ impl ProxyEngine {
     }
 
     fn create_response(&self, req: &SipPacket, code: u16, reason: &str) -> SipPacket {
+        // --- CORE KULLANIMI ---
         let mut resp = SipPacket::create_response_for(req, code, reason.to_string());
         resp.headers.push(Header::new(HeaderName::Server, "Sentiric/1.1 Stateful Proxy".to_string()));
         resp.headers.push(Header::new(HeaderName::ContentLength, "0".to_string()));
