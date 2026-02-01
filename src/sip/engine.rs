@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
-use tracing::{error, info, instrument, warn, debug};
+use tracing::{error, info, instrument, debug};
 use redis::AsyncCommands;
 
 pub type RedisConn = Arc<Mutex<redis::aio::MultiplexedConnection>>;
@@ -60,16 +60,13 @@ impl ProxyEngine {
         let has_route_header = packet.headers.iter().any(|h| h.name == HeaderName::Route);
 
         if !to_tag.is_empty() || has_route_header {
-            debug!("🔄 [PROXY-HANDLE] Diyalog içi istek (To-Tag veya Route var): {}", packet.method);
             return self.handle_in_dialog_request(packet, src_addr).await;
         }
         
         if packet.method == Method::Invite {
-            debug!("📞 [PROXY-HANDLE] Yeni INVITE isteği.");
             return self.handle_initial_invite(packet, src_addr).await;
         }
 
-        warn!("⚠️ [PROXY-HANDLE] Bilinmeyen/Stateless istek: {}. Varsayılan B2BUA'ya yönlendiriliyor.", packet.method);
         let target_host = &self.config.b2bua_sip_addr;
         match self.state.resolve_b2bua_addr(target_host).await {
             Ok(target_addr) => Some((packet.clone(), Some(target_addr))),
@@ -88,15 +85,24 @@ impl ProxyEngine {
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
         
-        // Kullanıcının gerçek IP'sini (client_addr) Contact URI olarak kaydediyoruz.
-        // Böylece Proxy, kullanıcıya geri dönebilir.
         let real_contact_uri = format!("sip:{}@{}:{}", username, client_addr.ip(), client_addr.port());
 
         let mut clients = self.clients.lock().await;
         let req = Request::new(RegisterRequest { sip_uri: aor, contact_uri: real_contact_uri, expires: 3600 });
 
         match clients.registrar.register(req).await {
-            Ok(_) => Some((self.create_response(packet, 200, "OK"), Some(client_addr))),
+            Ok(_) => {
+                let mut resp = self.create_response(packet, 200, "OK");
+                // RFC 3261: REGISTER yanıtı Contact içermelidir
+                if let Some(contact) = packet.get_header_value(HeaderName::Contact) {
+                    resp.headers.push(Header::new(HeaderName::Contact, contact.clone()));
+                }
+                // Kayıt süresini belirt
+                resp.headers.push(Header::new(HeaderName::Other("Expires".to_string()), "3600".to_string()));
+                
+                info!(user = %username, "✅ Kayıt başarılı, 200 OK dönülüyor.");
+                Some((resp, Some(client_addr)))
+            },
             Err(e) => {
                 error!("Registrar Service error: {}", e);
                 Some((self.create_response(packet, 500, "Internal Server Error"), Some(client_addr)))
@@ -113,13 +119,10 @@ impl ProxyEngine {
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
 
-        // Routing Kararı
-        let target_host = if callee_username == "9998" {
-            info!("🎯 [PROXY-ROUTE] INVITE -> PROBE (9998)");
-            &self.config.probe_sip_addr
-        } else {
-            info!("🎯 [PROXY-ROUTE] INVITE -> B2BUA (Default)");
+        let target_host = if callee_username == "9998" || callee_username == "9999" {
             &self.config.b2bua_sip_addr
+        } else {
+            &self.config.registrar_sip_addr
         };
 
         let target_addr = match self.state.resolve_b2bua_addr(target_host).await {
@@ -130,7 +133,6 @@ impl ProxyEngine {
             }
         };
 
-        // Redis State Update
         let client_leg_key = format!("proxy:route:{}:{}", call_id, from_tag);
         let target_leg_key_placeholder = format!("proxy:route:{}:{}", call_id, "callee");
 
@@ -138,7 +140,6 @@ impl ProxyEngine {
         let _: () = conn.set_ex(&client_leg_key, client_addr.to_string(), 300).await.unwrap_or_default();
         let _: () = conn.set_ex(&target_leg_key_placeholder, target_addr.to_string(), 300).await.unwrap_or_default();
         
-        // --- CORE KULLANIMI ---
         SipRouter::add_record_route(packet, &self.config.proxy_advertised_host, self.config.sip_port);
         SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
 
@@ -146,7 +147,6 @@ impl ProxyEngine {
     }
 
     async fn handle_in_dialog_request(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // Loose Routing Logic
         if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Route {
              packet.headers.remove(0);
         }
@@ -164,7 +164,6 @@ impl ProxyEngine {
         match conn.get::<_, String>(&target_redis_key).await {
             Ok(target_str) => {
                 if let Ok(target_addr) = target_str.parse() {
-                    // --- CORE KULLANIMI ---
                     SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
                     Some((packet.clone(), Some(target_addr)))
                 } else {
@@ -178,9 +177,7 @@ impl ProxyEngine {
     }
     
     async fn handle_response(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // --- CORE KULLANIMI ---
         if SipRouter::strip_top_via(packet).is_none() {
-            warn!("⚠️ [PROXY-HANDLE] Yanıt paketinde Via başlığı bulunamadı.");
             return None;
         }
 
@@ -188,7 +185,6 @@ impl ProxyEngine {
         let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
         let to_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::To));
 
-        // Late Binding (200 OK ile To-Tag eşleşmesi)
         if packet.status_code >= 200 && !to_tag.is_empty() {
             let old_key = format!("proxy:route:{}:{}", call_id, "callee");
             let new_key = format!("proxy:route:{}:{}", call_id, to_tag);
@@ -218,7 +214,6 @@ impl ProxyEngine {
     }
 
     fn create_response(&self, req: &SipPacket, code: u16, reason: &str) -> SipPacket {
-        // --- CORE KULLANIMI ---
         let mut resp = SipPacket::create_response_for(req, code, reason.to_string());
         resp.headers.push(Header::new(HeaderName::Server, "Sentiric/1.1 Stateful Proxy".to_string()));
         resp.headers.push(Header::new(HeaderName::ContentLength, "0".to_string()));

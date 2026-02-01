@@ -5,7 +5,8 @@ use sentiric_contracts::sentiric::sip::v1::{
     GetNextHopRequest, GetNextHopResponse,
 };
 use tonic::{Request, Response, Status};
-use tracing::{info, instrument};
+// DÜZELTME: info yerine debug eklendi (Hata çözümü)
+use tracing::{debug, instrument}; 
 use std::sync::Arc;
 use crate::config::AppConfig;
 
@@ -26,7 +27,6 @@ impl MyProxyService {
             clean
         };
         
-        // Parametreleri temizle (;user=phone vs)
         let user_part = if let Some(idx) = without_scheme.find('@') {
             &without_scheme[..idx]
         } else {
@@ -47,29 +47,29 @@ impl MyProxyService {
 #[tonic::async_trait]
 impl ProxyService for MyProxyService {
     
-    // Instrument macro, tracing için otomatik span oluşturur.
     #[instrument(skip_all, fields(dest = %request.get_ref().destination_uri, method = %request.get_ref().method))]
     async fn get_next_hop(
         &self,
         request: Request<GetNextHopRequest>,
     ) -> Result<Response<GetNextHopResponse>, Status> {
         let req = request.into_inner();
-        
         let destination_user = self.extract_username(&req.destination_uri);
 
-        // Routing Logic
+        // --- GÜNCELLEME: Yönlendirme Kararı ---
         let (target_uri, gateway_id) = if req.method == "REGISTER" {
-            (self.config.registrar_sip_addr.clone(), "sentiric-registrar-core".to_string())
+            // SBC, REGISTER paketlerini Proxy'nin SIP portuna iletmeli.
+            (self.config.registrar_sip_addr.clone(), "sentiric-proxy-internal".to_string())
         
-        } else if destination_user == "9998" {
-            (self.config.probe_sip_addr.clone(), "sentiric-sip-probe".to_string())
+        } else if destination_user == "9998" || destination_user == "9999" {
+            // Probe ve AI aramaları (B2BUA)
+            (self.config.b2bua_sip_addr.clone(), "sentiric-b2bua-primary".to_string())
         
         } else {
-            // Varsayılan olarak B2BUA (AI Orchestrator)
-            (self.config.b2bua_sip_addr.clone(), "sentiric-b2bua-primary".to_string())
+            // Varsayılan: Registrar (Dahili abone arama)
+            (self.config.registrar_sip_addr.clone(), "sentiric-registrar-core".to_string())
         };
 
-        info!("🔫 [TRACE-PROXY] gRPC Yönlendirme Kararı: {} -> {}", req.method, target_uri);
+        debug!("🔫 [TRACE-PROXY] gRPC Route Decision: {} -> {}", req.method, target_uri);
 
         Ok(Response::new(GetNextHopResponse {
             uri: target_uri,
