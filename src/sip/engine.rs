@@ -2,7 +2,6 @@ use crate::config::AppConfig;
 use crate::grpc::client::InternalClients;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::utils;
-use sentiric_contracts::sentiric::dialplan::v1::ResolveDialplanRequest; // YENİ
 use sentiric_contracts::sentiric::sip::v1::RegisterRequest;
 use sentiric_sip_core::{
     utils as sip_core_utils, 
@@ -13,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
-use tracing::{error, info, instrument, debug, warn}; // 'warn' eklendi
+use tracing::{error, info, instrument, debug, warn};
 use redis::AsyncCommands;
 use rand;
 
@@ -63,15 +62,32 @@ impl ProxyEngine {
             return self.handle_in_dialog_request(packet, src_addr).await;
         }
         
-        if packet.method == Method::Invite {
-            return self.handle_initial_invite(packet, src_addr).await;
-        }
-
+        // --- NİHAİ MANTIK: TÜM İLK İSTEKLER (INVITE vb.) B2BUA'YA GİDER ---
         let target_host = &self.config.b2bua_sip_addr;
+        let via_val = utils::get_header(packet, HeaderName::Via);
+        let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
+
         match self.state.resolve_b2bua_addr(target_host).await {
-            Ok(target_addr) => Some((packet.clone(), Some(target_addr))),
+            Ok(target_addr) => {
+                info!(target = %target_addr, "➡️ [ROUTE] Tüm ilk istekler B2BUA'ya yönlendiriliyor.");
+
+                // Redis Kaydı (Stateful Proxying için)
+                let call_id = utils::get_header(packet, HeaderName::CallId);
+                let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
+                let client_leg_key = format!("proxy:route:{}:{}", call_id, from_tag);
+                let target_leg_key_placeholder = format!("proxy:route:{}:{}", call_id, "callee");
+
+                let mut conn = self.redis.lock().await;
+                let _: () = conn.set_ex(&client_leg_key, client_addr.to_string(), 300).await.unwrap_or_default();
+                let _: () = conn.set_ex(&target_leg_key_placeholder, target_addr.to_string(), 300).await.unwrap_or_default();
+        
+                SipRouter::add_record_route(packet, &self.config.proxy_advertised_host, self.config.sip_port);
+                SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
+
+                Some((packet.clone(), Some(target_addr)))
+            }
             Err(e) => {
-                error!("❌ Hedef çözümlenemedi: {}: {}", target_host, e);
+                error!("❌ B2BUA adresi çözümlenemedi: {}: {}", target_host, e);
                 Some((self.create_response(packet, 503, "Service Unavailable"), Some(src_addr)))
             }
         }
@@ -115,56 +131,6 @@ impl ProxyEngine {
                 Some((self.create_response(packet, 500, "Internal Server Error"), Some(src_addr)))
             }
         }
-    }
-
-    async fn handle_initial_invite(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
-        let call_id = utils::get_header(packet, HeaderName::CallId);
-        let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
-        let to_aor = sip_core_utils::extract_aor(&utils::get_header(packet, HeaderName::To));
-        
-        let via_val = utils::get_header(packet, HeaderName::Via);
-        let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
-
-        // --- YENİ MANTIK: HER ZAMAN DIALPLAN'A SOR ---
-        let target_host: String;
-        let mut clients = self.clients.lock().await;
-        
-        let dialplan_req = Request::new(ResolveDialplanRequest {
-            caller_contact_value: utils::get_header(packet, HeaderName::From),
-            destination_number: to_aor.clone(),
-        });
-
-        match clients.dialplan.resolve_dialplan(dialplan_req).await {
-            Ok(res) => {
-                let resolution = res.into_inner();
-                info!(action = %resolution.action.as_ref().map_or("N/A", |a| &a.action), "✅ Dialplan yanıtı alındı.");
-                target_host = self.config.b2bua_sip_addr.clone();
-            },
-            Err(e) => {
-                error!(error = %e, "❌ Dialplan sorgusu başarısız. Çağrı reddedilecek.");
-                return Some((self.create_response(packet, 503, "Service Unavailable (Dialplan Error)"), Some(client_addr)));
-            }
-        }
-        
-        let target_addr = match self.state.resolve_b2bua_addr(&target_host).await {
-            Ok(addr) => addr,
-            Err(e) => {
-                error!("❌ Hedef çözümlenemedi: {}: {}", target_host, e);
-                return Some((self.create_response(packet, 503, "Service Unavailable"), Some(client_addr)));
-            }
-        };
-
-        let client_leg_key = format!("proxy:route:{}:{}", call_id, from_tag);
-        let target_leg_key_placeholder = format!("proxy:route:{}:{}", call_id, "callee");
-
-        let mut conn = self.redis.lock().await;
-        let _: () = conn.set_ex(&client_leg_key, client_addr.to_string(), 300).await.unwrap_or_default();
-        let _: () = conn.set_ex(&target_leg_key_placeholder, target_addr.to_string(), 300).await.unwrap_or_default();
-        
-        SipRouter::add_record_route(packet, &self.config.proxy_advertised_host, self.config.sip_port);
-        SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
-
-        Some((packet.clone(), Some(target_addr)))
     }
 
     async fn handle_in_dialog_request(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
