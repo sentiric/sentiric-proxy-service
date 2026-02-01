@@ -1,10 +1,8 @@
-// sentiric-proxy-service/src/sip/engine.rs
-
 use crate::config::AppConfig;
 use crate::grpc::client::InternalClients;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::utils;
-use sentiric_contracts::sentiric::sip::v1::RegisterRequest;
+use sentiric_contracts::sentiric::sip::v1::{RegisterRequest, LookupContactRequest};
 use sentiric_sip_core::{
     utils as sip_core_utils, 
     Header, HeaderName, Method, SipPacket,
@@ -14,8 +12,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
-use tracing::{error, info, instrument, debug}; // warn silindi
+use tracing::{error, info, instrument, debug};
 use redis::AsyncCommands;
+use rand;
 
 pub type RedisConn = Arc<Mutex<redis::aio::MultiplexedConnection>>;
 
@@ -42,7 +41,7 @@ impl ProxyEngine {
         packet: &mut SipPacket,
         src_addr: SocketAddr,
     ) -> Option<(SipPacket, Option<SocketAddr>)> {
-        debug!("🔫 [TRACE-PROXY] Paket Alındı. Method: {}, Src: {}", packet.method, src_addr);
+        debug!("🔫 [PROXY] Paket Alındı. Method: {}, Src: {}", packet.method, src_addr);
 
         if packet.is_request {
             self.handle_request(packet, src_addr).await
@@ -67,6 +66,7 @@ impl ProxyEngine {
             return self.handle_initial_invite(packet, src_addr).await;
         }
 
+        // Diğer metodlar (OPTIONS, PUBLISH vb.) varsayılan olarak B2BUA'ya
         let target_host = &self.config.b2bua_sip_addr;
         match self.state.resolve_b2bua_addr(target_host).await {
             Ok(target_addr) => Some((packet.clone(), Some(target_addr))),
@@ -79,8 +79,8 @@ impl ProxyEngine {
 
     async fn handle_register(&self, packet: &SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         let to_header = utils::get_header(packet, HeaderName::To);
-        let aor = sentiric_sip_core::utils::extract_aor(&to_header);
-        let username = sentiric_sip_core::utils::extract_username_from_uri(&aor);
+        let aor = sip_core_utils::extract_aor(&to_header);
+        let username = sip_core_utils::extract_username_from_uri(&aor);
         
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
@@ -88,13 +88,13 @@ impl ProxyEngine {
         let real_contact_uri = format!("sip:{}@{}:{}", username, client_addr.ip(), client_addr.port());
 
         let mut clients = self.clients.lock().await;
-        let req = tonic::Request::new(RegisterRequest { sip_uri: aor.clone(), contact_uri: real_contact_uri, expires: 3600 });
+        let req = Request::new(RegisterRequest { sip_uri: aor.clone(), contact_uri: real_contact_uri, expires: 3600 });
 
         match clients.registrar.register(req).await {
             Ok(_) => {
                 let mut resp = self.create_response(packet, 200, "OK");
                 
-                // --- TO-TAG (Linphone için Hayati) ---
+                // Linphone Fix: To-Tag ekle
                 if let Some(to_h) = resp.headers.iter_mut().find(|h| h.name == HeaderName::To) {
                     if !to_h.value.contains(";tag=") {
                         let tag = format!("{:x}", rand::random::<u32>());
@@ -102,7 +102,7 @@ impl ProxyEngine {
                     }
                 }
 
-                // --- CONTACT MIRRORING ---
+                // Linphone Fix: Contact Mirroring
                 if let Some(contact) = packet.get_header_value(HeaderName::Contact) {
                     resp.headers.retain(|h| h.name != HeaderName::Contact);
                     resp.headers.push(Header::new(HeaderName::Contact, contact.clone()));
@@ -112,7 +112,7 @@ impl ProxyEngine {
                 let now = chrono::Utc::now().to_rfc2822().replace("+0000", "GMT");
                 resp.headers.push(Header::new(HeaderName::Other("Date".to_string()), now));
 
-                info!(user = %username, "✅ REGISTER: 200 OK (Linphone Compatible) hazırlandı.");
+                info!(user = %username, "✅ REGISTER: 200 OK (Linphone Compatible) gönderildi.");
                 Some((resp, Some(src_addr)))
             },
             Err(e) => {
@@ -121,7 +121,7 @@ impl ProxyEngine {
             }
         }
     }
-    
+
     async fn handle_initial_invite(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         let call_id = utils::get_header(packet, HeaderName::CallId);
         let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
@@ -131,13 +131,37 @@ impl ProxyEngine {
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
 
-        let target_host = if callee_username == "9998" || callee_username == "9999" {
-            &self.config.b2bua_sip_addr
-        } else {
-            &self.config.registrar_sip_addr
-        };
+        // --- YÖNLENDİRME KARARI (DÖNGÜYÜ KIRAN KISIM) ---
+        let mut target_host = String::new();
 
-        let target_addr = match self.state.resolve_b2bua_addr(target_host).await {
+        if callee_username == "9998" {
+            target_host = self.config.probe_sip_addr.clone();
+            info!("🎯 [ROUTE] 9998 -> SIP Probe (Standard UAS)");
+        } else if callee_username == "9999" {
+            target_host = self.config.b2bua_sip_addr.clone();
+            info!("🎯 [ROUTE] 9999 -> B2BUA (AI Engine)");
+        } else {
+            // Dahili Abone Kontrolü (Registrar Lookup)
+            let mut clients = self.clients.lock().await;
+            let lookup_req = Request::new(LookupContactRequest { sip_uri: to_aor.clone() });
+
+            if let Ok(res) = clients.registrar.lookup_contact(lookup_req).await {
+                let uris = res.into_inner().contact_uris;
+                if !uris.is_empty() {
+                    // Kullanıcı kayıtlı! Onun gerçek IP'sine (SBC'ye) gönder.
+                    target_host = uris[0].replace("sip:", "").replace("udp:", "");
+                    info!(dest = %target_host, "🎯 [ROUTE] Dahili Abone bulundu, oraya yönlendiriliyor.");
+                }
+            }
+
+            if target_host.is_empty() {
+                // Kayıtlı olmayan her şey B2BUA'ya (AI veya Dış Hat)
+                target_host = self.config.b2bua_sip_addr.clone();
+                info!("🎯 [ROUTE] Bilinmeyen numara -> B2BUA");
+            }
+        }
+
+        let target_addr = match self.state.resolve_b2bua_addr(&target_host).await {
             Ok(addr) => addr,
             Err(e) => {
                 error!("❌ Hedef çözümlenemedi: {}: {}", target_host, e);
@@ -145,6 +169,7 @@ impl ProxyEngine {
             }
         };
 
+        // Redis Kaydı (Stateful Proxying)
         let client_leg_key = format!("proxy:route:{}:{}", call_id, from_tag);
         let target_leg_key_placeholder = format!("proxy:route:{}:{}", call_id, "callee");
 
