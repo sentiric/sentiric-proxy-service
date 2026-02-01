@@ -5,8 +5,7 @@ use sentiric_contracts::sentiric::sip::v1::{
     GetNextHopRequest, GetNextHopResponse,
 };
 use tonic::{Request, Response, Status};
-// DÜZELTME: info yerine debug eklendi (Hata çözümü)
-use tracing::{debug, instrument}; 
+use tracing::{debug, instrument};
 use std::sync::Arc;
 use crate::config::AppConfig;
 
@@ -21,26 +20,10 @@ impl MyProxyService {
 
     fn extract_username(&self, uri: &str) -> String {
         let clean = uri.trim();
-        let without_scheme = if let Some(idx) = clean.find(':') {
-            &clean[idx+1..]
-        } else {
-            clean
-        };
-        
-        let user_part = if let Some(idx) = without_scheme.find('@') {
-            &without_scheme[..idx]
-        } else {
-            without_scheme 
-        };
-
-        if let Some(idx) = user_part.find(';') {
-            &user_part[..idx]
-        } else {
-            user_part
-        }
-        .replace('<', "") 
-        .replace('>', "")
-        .to_string()
+        let without_scheme = if let Some(idx) = clean.find(':') { &clean[idx+1..] } else { clean };
+        let user_part = if let Some(idx) = without_scheme.find('@') { &without_scheme[..idx] } else { without_scheme };
+        if let Some(idx) = user_part.find(';') { user_part[..idx].to_string() } else { user_part.to_string() }
+            .replace('<', "").replace('>', "")
     }
 }
 
@@ -55,21 +38,22 @@ impl ProxyService for MyProxyService {
         let req = request.into_inner();
         let destination_user = self.extract_username(&req.destination_uri);
 
-        // --- GÜNCELLEME: Yönlendirme Kararı ---
+        // --- ENVIRONMENT TABANLI YÖNLENDİRME ---
+        // registrar_sip_addr config'den gelir ve aslında bu servis (proxy) adresidir.
         let (target_uri, gateway_id) = if req.method == "REGISTER" {
-            // SBC, REGISTER paketlerini Proxy'nin SIP portuna iletmeli.
-            (self.config.registrar_sip_addr.clone(), "sentiric-proxy-internal".to_string())
+            // REGISTER talepleri doğrudan bu servisin SIP portuna gelmeli
+            (self.config.registrar_sip_addr.clone(), "sentiric-proxy-local".to_string())
         
         } else if destination_user == "9998" || destination_user == "9999" {
-            // Probe ve AI aramaları (B2BUA)
+            // AI servisleri
             (self.config.b2bua_sip_addr.clone(), "sentiric-b2bua-primary".to_string())
         
         } else {
-            // Varsayılan: Registrar (Dahili abone arama)
-            (self.config.registrar_sip_addr.clone(), "sentiric-registrar-core".to_string())
+            // Dahili abone aramaları yine Proxy üzerinden yönlenir
+            (self.config.registrar_sip_addr.clone(), "sentiric-proxy-router".to_string())
         };
 
-        debug!("🔫 [TRACE-PROXY] gRPC Route Decision: {} -> {}", req.method, target_uri);
+        debug!("🚀 [ROUTE] Decision: {} -> {}", req.method, target_uri);
 
         Ok(Response::new(GetNextHopResponse {
             uri: target_uri,

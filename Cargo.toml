@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-proxy-service"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 
 [dependencies]
@@ -15,6 +15,7 @@ thiserror = "1.0"
 hyper = { version = "0.14.28", features = ["full"] } 
 config = "0.14" 
 uuid = { version = "1.8", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] } # EKLE
 
 redis = { version = "0.26", features = ["tokio-rustls-comp"] }
 

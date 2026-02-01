@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
-use tracing::{error, info, instrument, debug};
+use tracing::{error, info, instrument, debug}; // warn silindi
 use redis::AsyncCommands;
 
 pub type RedisConn = Arc<Mutex<redis::aio::MultiplexedConnection>>;
@@ -88,19 +88,24 @@ impl ProxyEngine {
         let real_contact_uri = format!("sip:{}@{}:{}", username, client_addr.ip(), client_addr.port());
 
         let mut clients = self.clients.lock().await;
-        let req = Request::new(RegisterRequest { sip_uri: aor, contact_uri: real_contact_uri, expires: 3600 });
+        let req = Request::new(RegisterRequest { sip_uri: aor.clone(), contact_uri: real_contact_uri, expires: 3600 });
 
         match clients.registrar.register(req).await {
             Ok(_) => {
                 let mut resp = self.create_response(packet, 200, "OK");
-                // RFC 3261: REGISTER yanıtı Contact içermelidir
+                
+                // --- LİNPHONE UYUMLULUĞU İÇİN HEADERLAR ---
                 if let Some(contact) = packet.get_header_value(HeaderName::Contact) {
                     resp.headers.push(Header::new(HeaderName::Contact, contact.clone()));
                 }
-                // Kayıt süresini belirt
+                
                 resp.headers.push(Header::new(HeaderName::Other("Expires".to_string()), "3600".to_string()));
                 
-                info!(user = %username, "✅ Kayıt başarılı, 200 OK dönülüyor.");
+                // RFC 3261: Date header (zorunlu olmasa da birçok istemci bekler)
+                let now = chrono::Utc::now().to_rfc2822().replace("+0000", "GMT");
+                resp.headers.push(Header::new(HeaderName::Other("Date".to_string()), now));
+
+                info!(user = %username, "✅ REGISTER: 200 OK başarıyla gönderildi.");
                 Some((resp, Some(client_addr)))
             },
             Err(e) => {
@@ -215,7 +220,7 @@ impl ProxyEngine {
 
     fn create_response(&self, req: &SipPacket, code: u16, reason: &str) -> SipPacket {
         let mut resp = SipPacket::create_response_for(req, code, reason.to_string());
-        resp.headers.push(Header::new(HeaderName::Server, "Sentiric/1.1 Stateful Proxy".to_string()));
+        resp.headers.push(Header::new(HeaderName::Server, "Sentiric-Proxy/1.2".to_string()));
         resp.headers.push(Header::new(HeaderName::ContentLength, "0".to_string()));
         resp
     }
