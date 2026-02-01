@@ -79,8 +79,8 @@ impl ProxyEngine {
 
     async fn handle_register(&self, packet: &SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         let to_header = utils::get_header(packet, HeaderName::To);
-        let aor = sip_core_utils::extract_aor(&to_header);
-        let username = sip_core_utils::extract_username_from_uri(&aor);
+        let aor = sentiric_sip_core::utils::extract_aor(&to_header);
+        let username = sentiric_sip_core::utils::extract_username_from_uri(&aor);
         
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
@@ -88,13 +88,13 @@ impl ProxyEngine {
         let real_contact_uri = format!("sip:{}@{}:{}", username, client_addr.ip(), client_addr.port());
 
         let mut clients = self.clients.lock().await;
-        let req = Request::new(RegisterRequest { sip_uri: aor.clone(), contact_uri: real_contact_uri, expires: 3600 });
+        let req = tonic::Request::new(RegisterRequest { sip_uri: aor.clone(), contact_uri: real_contact_uri, expires: 3600 });
 
         match clients.registrar.register(req).await {
             Ok(_) => {
                 let mut resp = self.create_response(packet, 200, "OK");
                 
-                // --- 1. KRİTİK: To-Tag Ekleme (Linphone için zorunlu) ---
+                // --- TO-TAG (Linphone için Hayati) ---
                 if let Some(to_h) = resp.headers.iter_mut().find(|h| h.name == HeaderName::To) {
                     if !to_h.value.contains(";tag=") {
                         let tag = format!("{:x}", rand::random::<u32>());
@@ -102,13 +102,12 @@ impl ProxyEngine {
                     }
                 }
 
-                // --- 2. KRİTİK: Contact Header'ı İstemciye Göre Yansıtma ---
+                // --- CONTACT MIRRORING ---
                 if let Some(contact) = packet.get_header_value(HeaderName::Contact) {
                     resp.headers.retain(|h| h.name != HeaderName::Contact);
                     resp.headers.push(Header::new(HeaderName::Contact, contact.clone()));
                 }
                 
-                // --- 3. STANDART: Expires ve Date Headerları ---
                 resp.headers.push(Header::new(HeaderName::Other("Expires".to_string()), "3600".to_string()));
                 let now = chrono::Utc::now().to_rfc2822().replace("+0000", "GMT");
                 resp.headers.push(Header::new(HeaderName::Other("Date".to_string()), now));
