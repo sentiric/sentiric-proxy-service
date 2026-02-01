@@ -12,11 +12,8 @@ pub struct AppConfig {
     pub sip_port: u16,
     pub proxy_advertised_host: String,
     
-    // --- YENİ EKLENEN ALAN ---
-    // Sistemin dış dünyadaki IP adresi. Loopback tespiti için gerekli.
-    pub public_ip: String, 
-    // -------------------------
-
+    pub public_ip: String, // YENİ
+    
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
     pub dialplan_grpc_url: String,
@@ -45,13 +42,10 @@ impl AppConfig {
         let grpc_addr: SocketAddr = format!("[::]:{}", grpc_port).parse()?;
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
         
-        // --- YENİ EKLENEN MANTIK ---
-        // PUBLIC_IP verilmezse NODE_IP'yi, o da yoksa localhost'u varsay.
         let public_ip = env::var("SBC_SERVICE_PUBLIC_IP")
             .or_else(|_| env::var("PUBLIC_IP"))
             .or_else(|_| env::var("NODE_IP"))
             .unwrap_or_else(|_| "127.0.0.1".to_string());
-        // ---------------------------
 
         Ok(AppConfig {
             grpc_listen_addr: grpc_addr,
@@ -62,7 +56,7 @@ impl AppConfig {
             proxy_advertised_host: env::var("PROXY_SERVICE_ADVERTISED_HOST")
                 .unwrap_or_else(|_| "proxy-service".to_string()),
             
-            public_ip, // Struct'a eklendi
+            public_ip, // YENİ
 
             registrar_grpc_url: env::var("REGISTRAR_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://registrar-service:13061".to_string()),

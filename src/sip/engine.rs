@@ -2,7 +2,8 @@ use crate::config::AppConfig;
 use crate::grpc::client::InternalClients;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::utils;
-use sentiric_contracts::sentiric::sip::v1::{RegisterRequest, LookupContactRequest};
+use sentiric_contracts::sentiric::dialplan::v1::ResolveDialplanRequest; // YENİ
+use sentiric_contracts::sentiric::sip::v1::RegisterRequest;
 use sentiric_sip_core::{
     utils as sip_core_utils, 
     Header, HeaderName, Method, SipPacket,
@@ -12,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
-use tracing::{error, info, instrument, debug};
+use tracing::{error, info, instrument, debug, warn}; // 'warn' eklendi
 use redis::AsyncCommands;
 use rand;
 
@@ -66,7 +67,6 @@ impl ProxyEngine {
             return self.handle_initial_invite(packet, src_addr).await;
         }
 
-        // Diğer metodlar (OPTIONS, PUBLISH vb.) varsayılan olarak B2BUA'ya
         let target_host = &self.config.b2bua_sip_addr;
         match self.state.resolve_b2bua_addr(target_host).await {
             Ok(target_addr) => Some((packet.clone(), Some(target_addr))),
@@ -93,21 +93,16 @@ impl ProxyEngine {
         match clients.registrar.register(req).await {
             Ok(_) => {
                 let mut resp = self.create_response(packet, 200, "OK");
-                
-                // Linphone Fix: To-Tag ekle
                 if let Some(to_h) = resp.headers.iter_mut().find(|h| h.name == HeaderName::To) {
                     if !to_h.value.contains(";tag=") {
                         let tag = format!("{:x}", rand::random::<u32>());
                         to_h.value.push_str(&format!(";tag={}", tag));
                     }
                 }
-
-                // Linphone Fix: Contact Mirroring
                 if let Some(contact) = packet.get_header_value(HeaderName::Contact) {
                     resp.headers.retain(|h| h.name != HeaderName::Contact);
                     resp.headers.push(Header::new(HeaderName::Contact, contact.clone()));
                 }
-                
                 resp.headers.push(Header::new(HeaderName::Other("Expires".to_string()), "3600".to_string()));
                 let now = chrono::Utc::now().to_rfc2822().replace("+0000", "GMT");
                 resp.headers.push(Header::new(HeaderName::Other("Date".to_string()), now));
@@ -126,67 +121,31 @@ impl ProxyEngine {
         let call_id = utils::get_header(packet, HeaderName::CallId);
         let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));
         let to_aor = sip_core_utils::extract_aor(&utils::get_header(packet, HeaderName::To));
-        let callee_username = sip_core_utils::extract_username_from_uri(&to_aor);
         
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
 
-        let mut target_host = String::new();
+        // --- YENİ MANTIK: HER ZAMAN DIALPLAN'A SOR ---
+        let target_host: String;
+        let mut clients = self.clients.lock().await;
+        
+        let dialplan_req = Request::new(ResolveDialplanRequest {
+            caller_contact_value: utils::get_header(packet, HeaderName::From),
+            destination_number: to_aor.clone(),
+        });
 
-        // 1. Önce özel numaraları kontrol et
-        if callee_username == "9998" {
-            target_host = self.config.probe_sip_addr.clone();
-            info!("🎯 [ROUTE] 9998 -> SIP Probe");
-        } else if callee_username == "9999" {
-            target_host = self.config.b2bua_sip_addr.clone();
-            info!("🎯 [ROUTE] 9999 -> B2BUA (AI Engine)");
-        } else {
-            // 2. Dahili Abone Kontrolü (Registrar Lookup)
-            let mut clients = self.clients.lock().await;
-            let lookup_req = Request::new(LookupContactRequest { sip_uri: to_aor.clone() });
-
-            if let Ok(res) = clients.registrar.lookup_contact(lookup_req).await {
-                let uris = res.into_inner().contact_uris;
-                if !uris.is_empty() {
-                    let contact_uri = &uris[0];
-                    
-                    // --- KRİTİK DÜZELTME: URI Parsing ve Loopback Önleme ---
-                    // Gelen veri formatı: "sip:2002@34.122.40.122:13094"
-                    
-                    // a) Saf host:port kısmını ayıkla
-                    let mut clean_target = contact_uri.replace("sip:", "").replace("udp:", "");
-                    if let Some(at_pos) = clean_target.find('@') {
-                        clean_target = clean_target[at_pos+1..].to_string();
-                    }
-                    
-                    // b) Loopback Kontrolü (Production Fix)
-                    // Eğer hedef IP bizim Public IP'miz ise, trafiği dışarı çıkarmadan
-                    // doğrudan iç ağdaki SBC servisine yönlendir.
-                    if clean_target.contains(&self.config.public_ip) {
-                        info!(
-                            public_ip = %self.config.public_ip, 
-                            original = %clean_target,
-                            "🔄 [ROUTE] NAT Loopback Tespit Edildi! Trafik dahili SBC'ye yönlendiriliyor."
-                        );
-                        // Public IP yerine Docker servis adını koyuyoruz. 
-                        // Port numarası (13094) korunur.
-                        target_host = clean_target.replace(&self.config.public_ip, "sbc-service");
-                    } else {
-                        target_host = clean_target;
-                    }
-                    
-                    info!(dest = %target_host, original_uri = %contact_uri, "🎯 [ROUTE] Dahili Abone bulundu.");
-                }
-            }
-
-            if target_host.is_empty() {
-                // Kayıtlı olmayan her şey B2BUA'ya (AI veya Dış Hat)
+        match clients.dialplan.resolve_dialplan(dialplan_req).await {
+            Ok(res) => {
+                let resolution = res.into_inner();
+                info!(action = %resolution.action.as_ref().map_or("N/A", |a| &a.action), "✅ Dialplan yanıtı alındı.");
                 target_host = self.config.b2bua_sip_addr.clone();
-                info!("🎯 [ROUTE] Bilinmeyen numara -> B2BUA");
+            },
+            Err(e) => {
+                error!(error = %e, "❌ Dialplan sorgusu başarısız. Çağrı reddedilecek.");
+                return Some((self.create_response(packet, 503, "Service Unavailable (Dialplan Error)"), Some(client_addr)));
             }
         }
-
-        // DNS/IP Çözümleme ve Redis Kaydı
+        
         let target_addr = match self.state.resolve_b2bua_addr(&target_host).await {
             Ok(addr) => addr,
             Err(e) => {
@@ -195,7 +154,6 @@ impl ProxyEngine {
             }
         };
 
-        // Redis Kaydı (Stateful Proxying)
         let client_leg_key = format!("proxy:route:{}:{}", call_id, from_tag);
         let target_leg_key_placeholder = format!("proxy:route:{}:{}", call_id, "callee");
 
