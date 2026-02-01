@@ -131,26 +131,51 @@ impl ProxyEngine {
         let via_val = utils::get_header(packet, HeaderName::Via);
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
 
-        // --- YÖNLENDİRME KARARI (DÖNGÜYÜ KIRAN KISIM) ---
         let mut target_host = String::new();
 
+        // 1. Önce özel numaraları kontrol et
         if callee_username == "9998" {
             target_host = self.config.probe_sip_addr.clone();
-            info!("🎯 [ROUTE] 9998 -> SIP Probe (Standard UAS)");
+            info!("🎯 [ROUTE] 9998 -> SIP Probe");
         } else if callee_username == "9999" {
             target_host = self.config.b2bua_sip_addr.clone();
             info!("🎯 [ROUTE] 9999 -> B2BUA (AI Engine)");
         } else {
-            // Dahili Abone Kontrolü (Registrar Lookup)
+            // 2. Dahili Abone Kontrolü (Registrar Lookup)
             let mut clients = self.clients.lock().await;
             let lookup_req = Request::new(LookupContactRequest { sip_uri: to_aor.clone() });
 
             if let Ok(res) = clients.registrar.lookup_contact(lookup_req).await {
                 let uris = res.into_inner().contact_uris;
                 if !uris.is_empty() {
-                    // Kullanıcı kayıtlı! Onun gerçek IP'sine (SBC'ye) gönder.
-                    target_host = uris[0].replace("sip:", "").replace("udp:", "");
-                    info!(dest = %target_host, "🎯 [ROUTE] Dahili Abone bulundu, oraya yönlendiriliyor.");
+                    let contact_uri = &uris[0];
+                    
+                    // --- KRİTİK DÜZELTME: URI Parsing ve Loopback Önleme ---
+                    // Gelen veri formatı: "sip:2002@34.122.40.122:13094"
+                    
+                    // a) Saf host:port kısmını ayıkla
+                    let mut clean_target = contact_uri.replace("sip:", "").replace("udp:", "");
+                    if let Some(at_pos) = clean_target.find('@') {
+                        clean_target = clean_target[at_pos+1..].to_string();
+                    }
+                    
+                    // b) Loopback Kontrolü (Production Fix)
+                    // Eğer hedef IP bizim Public IP'miz ise, trafiği dışarı çıkarmadan
+                    // doğrudan iç ağdaki SBC servisine yönlendir.
+                    if clean_target.contains(&self.config.public_ip) {
+                        info!(
+                            public_ip = %self.config.public_ip, 
+                            original = %clean_target,
+                            "🔄 [ROUTE] NAT Loopback Tespit Edildi! Trafik dahili SBC'ye yönlendiriliyor."
+                        );
+                        // Public IP yerine Docker servis adını koyuyoruz. 
+                        // Port numarası (13094) korunur.
+                        target_host = clean_target.replace(&self.config.public_ip, "sbc-service");
+                    } else {
+                        target_host = clean_target;
+                    }
+                    
+                    info!(dest = %target_host, original_uri = %contact_uri, "🎯 [ROUTE] Dahili Abone bulundu.");
                 }
             }
 
@@ -161,6 +186,7 @@ impl ProxyEngine {
             }
         }
 
+        // DNS/IP Çözümleme ve Redis Kaydı
         let target_addr = match self.state.resolve_b2bua_addr(&target_host).await {
             Ok(addr) => addr,
             Err(e) => {
