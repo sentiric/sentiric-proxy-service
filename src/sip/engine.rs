@@ -94,27 +94,35 @@ impl ProxyEngine {
             Ok(_) => {
                 let mut resp = self.create_response(packet, 200, "OK");
                 
-                // --- LİNPHONE UYUMLULUĞU İÇİN HEADERLAR ---
+                // --- 1. KRİTİK: To-Tag Ekleme (Linphone için zorunlu) ---
+                if let Some(to_h) = resp.headers.iter_mut().find(|h| h.name == HeaderName::To) {
+                    if !to_h.value.contains(";tag=") {
+                        let tag = format!("{:x}", rand::random::<u32>());
+                        to_h.value.push_str(&format!(";tag={}", tag));
+                    }
+                }
+
+                // --- 2. KRİTİK: Contact Header'ı İstemciye Göre Yansıtma ---
                 if let Some(contact) = packet.get_header_value(HeaderName::Contact) {
+                    resp.headers.retain(|h| h.name != HeaderName::Contact);
                     resp.headers.push(Header::new(HeaderName::Contact, contact.clone()));
                 }
                 
+                // --- 3. STANDART: Expires ve Date Headerları ---
                 resp.headers.push(Header::new(HeaderName::Other("Expires".to_string()), "3600".to_string()));
-                
-                // RFC 3261: Date header (zorunlu olmasa da birçok istemci bekler)
                 let now = chrono::Utc::now().to_rfc2822().replace("+0000", "GMT");
                 resp.headers.push(Header::new(HeaderName::Other("Date".to_string()), now));
 
-                info!(user = %username, "✅ REGISTER: 200 OK başarıyla gönderildi.");
-                Some((resp, Some(client_addr)))
+                info!(user = %username, "✅ REGISTER: 200 OK (Linphone Compatible) hazırlandı.");
+                Some((resp, Some(src_addr)))
             },
             Err(e) => {
                 error!("Registrar Service error: {}", e);
-                Some((self.create_response(packet, 500, "Internal Server Error"), Some(client_addr)))
+                Some((self.create_response(packet, 500, "Internal Server Error"), Some(src_addr)))
             }
         }
     }
-
+    
     async fn handle_initial_invite(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         let call_id = utils::get_header(packet, HeaderName::CallId);
         let from_tag = self.extract_tag_from_header(&utils::get_header(packet, HeaderName::From));

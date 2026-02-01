@@ -21,3 +21,4 @@ redis = { version = "0.26", features = ["tokio-rustls-comp"] }
 
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.3.2" }
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.13.6" }
+rand = "0.9.2"
