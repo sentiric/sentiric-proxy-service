@@ -4,7 +4,6 @@ use crate::config::AppConfig;
 use anyhow::Result;
 use sentiric_contracts::sentiric::sip::v1::registrar_service_client::RegistrarServiceClient;
 use sentiric_contracts::sentiric::sip::v1::b2bua_service_client::B2buaServiceClient;
-// YENİ: Dialplan Client Import
 use sentiric_contracts::sentiric::dialplan::v1::dialplan_service_client::DialplanServiceClient;
 
 use tonic::transport::{Channel, ClientTlsConfig, Certificate, Identity};
@@ -14,22 +13,21 @@ use tracing::{info};
 pub struct InternalClients {
     pub registrar: RegistrarServiceClient<Channel>,
     pub b2bua: B2buaServiceClient<Channel>,
-    pub dialplan: DialplanServiceClient<Channel>, // YENİ
+    pub dialplan: DialplanServiceClient<Channel>,
 }
 
 impl InternalClients {
     pub async fn connect(config: &AppConfig) -> Result<Self> {
-        info!("İç servislere bağlanılıyor...");
+        info!("İç servislere bağlanılıyor (mTLS)...");
 
         let registrar_channel = create_secure_channel(&config.registrar_grpc_url, "registrar-service", config).await?;
         let b2bua_channel = create_secure_channel(&config.b2bua_grpc_url, "b2bua-service", config).await?;
-        // YENİ: Dialplan Bağlantısı
         let dialplan_channel = create_secure_channel(&config.dialplan_grpc_url, "dialplan-service", config).await?;
 
         Ok(Self {
             registrar: RegistrarServiceClient::new(registrar_channel),
             b2bua: B2buaServiceClient::new(b2bua_channel),
-            dialplan: DialplanServiceClient::new(dialplan_channel), // YENİ
+            dialplan: DialplanServiceClient::new(dialplan_channel),
         })
     }
 }

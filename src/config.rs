@@ -12,17 +12,20 @@ pub struct AppConfig {
     pub sip_port: u16,
     pub proxy_advertised_host: String,
     
-    pub public_ip: String, // YENİ
+    pub public_ip: String,
     
+    // Bağımlı Servisler (gRPC)
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
     pub dialplan_grpc_url: String,
-    pub redis_url: String,
-
+    
+    // SIP Hedefleri (Load Balancer'ın arkasındaki servisler)
     pub b2bua_sip_addr: String,
     pub registrar_sip_addr: String,
-    pub probe_sip_addr: String,
     
+    // Cache
+    pub redis_url: String,
+
     pub env: String,
     pub rust_log: String,
     pub service_version: String,
@@ -56,7 +59,7 @@ impl AppConfig {
             proxy_advertised_host: env::var("PROXY_SERVICE_ADVERTISED_HOST")
                 .unwrap_or_else(|_| "proxy-service".to_string()),
             
-            public_ip, // YENİ
+            public_ip,
 
             registrar_grpc_url: env::var("REGISTRAR_SERVICE_TARGET_GRPC_URL")
                 .unwrap_or_else(|_| "https://registrar-service:13061".to_string()),
@@ -72,12 +75,9 @@ impl AppConfig {
             registrar_sip_addr: env::var("REGISTRAR_SERVICE_SIP_TARGET")
                 .unwrap_or_else(|_| "proxy-service:13074".to_string()),
             
-            probe_sip_addr: env::var("PROBE_SERVICE_SIP_TARGET")
-                .unwrap_or_else(|_| "sip-probe:13024".to_string()),
-            
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.2.0".to_string()),
+            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.3.0".to_string()),
             
             cert_path: env::var("PROXY_SERVICE_CERT_PATH").context("ZORUNLU: PROXY_SERVICE_CERT_PATH eksik")?,
             key_path: env::var("PROXY_SERVICE_KEY_PATH").context("ZORUNLU: PROXY_SERVICE_KEY_PATH eksik")?,

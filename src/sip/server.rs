@@ -12,7 +12,6 @@ use tokio::net::lookup_host;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-// Sabit public yapıldı
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
 #[derive(Default)]
@@ -32,7 +31,6 @@ impl ProxyState {
     }
 
     pub async fn resolve_b2bua_addr(&self, hostname: &str) -> Result<SocketAddr> {
-        // Eğer hostname zaten IP:Port formatındaysa DNS'e gitme
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Ok(addr);
         }
@@ -42,16 +40,15 @@ impl ProxyState {
 
         if let Some((addr, timestamp)) = cache.addr {
             if now.duration_since(timestamp) < Duration::from_secs(60) {
-                debug!("B2BUA DNS cache hit: {}", addr);
                 return Ok(addr);
             }
         }
 
-        info!("B2BUA DNS cache miss or stale, resolving: {}", hostname);
+        info!("DNS Çözümleniyor: {}", hostname);
         let addr = lookup_host(hostname)
             .await?
             .next()
-            .ok_or_else(|| anyhow!("'{}' için DNS kaydı bulunamadı", hostname))?;
+            .ok_or_else(|| anyhow!("DNS kaydı yok: {}", hostname))?;
         
         cache.addr = Some((addr, now));
         Ok(addr)
@@ -82,10 +79,7 @@ impl SipServer {
     }
 
     pub async fn run(self, mut shutdown_rx: mpsc::Receiver<()>) {
-        info!(
-            "📡 Proxy SIP Listener aktif: {}:{}",
-            self.config.sip_bind_ip, self.config.sip_port
-        );
+        info!("📡 Proxy SIP Dinleyicisi Aktif: {}:{}", self.config.sip_bind_ip, self.config.sip_port);
 
         let mut buf = vec![0u8; 65535];
         let socket = self.transport.get_socket();
@@ -103,7 +97,8 @@ impl SipServer {
                             if len < 4 { continue; }
                             
                             // Keep-alive (CRLF) filtresi
-                            if len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n') {
+                            if len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
+                                debug!("💤 Keep-Alive paketi (Yoksayıldı) -> {}", src_addr);
                                 continue;
                             }
 
@@ -115,20 +110,18 @@ impl SipServer {
                                         if let Some(dest) = target_addr_opt {
                                             let resp_bytes = resp_packet.to_bytes();
                                             if let Err(e) = self.transport.send(&resp_bytes, dest).await {
-                                                error!("SIP paketi gönderilemedi {}: {}", dest, e);
+                                                error!("🔥 SIP paketi gönderilemedi {}: {}", dest, e);
                                             }
                                         }
                                     }
                                 },
                                 Err(e) => {
-                                    if len > 4 {
-                                        warn!("Hatalı SIP paketi {}: {}", src_addr, e);
-                                    }
+                                    warn!("⚠️ Bozuk SIP paketi {}: {}", src_addr, e);
                                 }
                             }
                         },
                         Err(e) => {
-                            error!("UDP alma hatası: {}", e);
+                            error!("🔥 UDP Socket Hatası: {}", e);
                         }
                     }
                 }
