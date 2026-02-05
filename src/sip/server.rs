@@ -2,7 +2,9 @@
 
 use crate::config::AppConfig;
 use crate::grpc::client::InternalClients;
-use crate::sip::engine::{ProxyEngine, RedisConn};
+use crate::sip::engine::ProxyEngine;
+// DÜZELTME: RedisConn doğru yerden (handlers::routing) çağrılıyor
+use crate::sip::handlers::routing::RedisConn; 
 use anyhow::{anyhow, Result};
 use sentiric_sip_core::{parser, SipTransport};
 use std::net::SocketAddr;
