@@ -26,7 +26,7 @@ impl MyProxyService {
     }
 
     /// SIP URI'den kullanıcı adını (veya telefon numarasını) ayıklar.
-    /// Örn: "sip:1001@sentiric.cloud" -> "1001"
+    /// Örn: "sip:1001@sentiric.cloud;user=phone" -> "1001"
     fn extract_username(&self, uri: &str) -> String {
         let clean = uri.trim();
         // Şemayı at (sip: veya sips:)
@@ -54,7 +54,7 @@ impl ProxyService for MyProxyService {
         let destination_user = self.extract_username(&req.destination_uri);
         
         // ---------------------------------------------------------------------
-        // 1. REGISTER İsteği (Özel Durum)
+        // 1. REGISTER İsteği (Özel Durum - Infrastructure Rule)
         // ---------------------------------------------------------------------
         // Kayıt istekleri her zaman yerel Proxy'nin SIP portuna (13074) gelmelidir.
         // ProxyEngine, bu isteği alıp Registrar gRPC servisine çevirecektir.
@@ -67,8 +67,9 @@ impl ProxyService for MyProxyService {
         }
 
         // ---------------------------------------------------------------------
-        // 2. INVITE ve Diğer İstekler: DIALPLAN SORGUSU
+        // 2. DIALPLAN SORGUSU (Dynamic Routing)
         // ---------------------------------------------------------------------
+        // Hard-code mantık kaldırıldı. Her şey Dialplan servisine sorulur.
         let mut clients = self.clients.lock().await;
         
         // Arayan bilgisini (From) çözümlemek karmaşık olabilir, şimdilik "anonymous" 
@@ -83,7 +84,7 @@ impl ProxyService for MyProxyService {
             Ok(res) => res.into_inner(),
             Err(e) => {
                 error!("❌ Dialplan servisine ulaşılamadı: {}", e);
-                // Failsafe: Dialplan yoksa B2BUA'ya gönder (O da hata mesajı çalar)
+                // Fail-safe: Dialplan yoksa B2BUA'ya gönder (O da hata mesajı çalar)
                 return Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-failsafe".to_string(),
@@ -102,6 +103,7 @@ impl ProxyService for MyProxyService {
             // A. DAHİLİ ARAMA (P2P - Bridge)
             "BRIDGE_CALL" => {
                 // Hedef bir iç abone. Registrar'a sorup anlık IP'sini bulmalıyız.
+                // Not: Dialplan servisi "MatchedUser" dönmüş olabilir ama güncel Contact URI için Registrar şarttır.
                 let lookup_req = Request::new(LookupContactRequest {
                     sip_uri: req.destination_uri.clone(), // Tam SIP URI gönder
                 });
@@ -133,21 +135,13 @@ impl ProxyService for MyProxyService {
             },
             
             // B. DIŞ HAT veya AI KONUŞMASI (B2BUA)
-            // Bu aksiyonlar iş mantığı gerektirir, medya sunucusu üzerinden geçer.
-            "START_AI_CONVERSATION" | "PROCESS_GUEST_CALL" | "PLAY_ANNOUNCEMENT" | "START_ECHO_TEST" => {
-                info!("🤖 [ROUTE] AI/Medya İşlemi -> B2BUA");
+            // Echo Test, IVR, Dış Arama vb. hepsi B2BUA üzerinden yönetilir.
+            // Bu servisler medya (RTP) gerektirir ve stateful'dur.
+            _ => {
+                info!("🤖 [ROUTE] İş Mantığı -> B2BUA");
                 return Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-ai-gateway".to_string(),
-                }));
-            },
-
-            // C. BİLİNMEYEN DURUM
-            _ => {
-                warn!("⚠️ [ROUTE] Bilinmeyen Aksiyon: {}. Varsayılan olarak B2BUA deneniyor.", action_name);
-                return Ok(Response::new(GetNextHopResponse {
-                    uri: self.config.b2bua_sip_addr.clone(),
-                    gateway_id: "sentiric-fallback".to_string(),
                 }));
             }
         }
