@@ -6,13 +6,13 @@ use sentiric_contracts::sentiric::sip::v1::{
     LookupContactRequest,
 };
 use sentiric_contracts::sentiric::dialplan::v1::{
-    ResolveDialplanRequest,
+    ResolveDialplanRequest, ActionType
 };
 use sentiric_sip_core::SipUri;
 use std::str::FromStr;
 
 use tonic::{Request, Response, Status};
-use tracing::{info, error, warn, instrument}; // warn eklendi
+use tracing::{info, error, warn, instrument};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::config::AppConfig;
@@ -29,12 +29,10 @@ impl MyProxyService {
     }
 
     /// SIP URI'den kullanıcı adını güvenli şekilde ayıklar.
-    /// Örn: "sip:+90555...@domain" -> "+90555..."
     fn extract_username(&self, uri_str: &str) -> String {
         match SipUri::from_str(uri_str) {
             Ok(uri) => uri.user.unwrap_or_else(|| "anonymous".to_string()),
             Err(_) => {
-                // Fallback: Basit string manipülasyonu
                 let clean = uri_str.replace('<', "").replace('>', "");
                 if let Some(idx) = clean.find('@') {
                     let start = clean.find(':').map(|i| i + 1).unwrap_or(0);
@@ -62,20 +60,14 @@ impl ProxyService for MyProxyService {
         let req = request.into_inner();
         let destination_user = self.extract_username(&req.destination_uri);
         
-        // --- IDENTITY RESOLUTION LOGIC (v2.1) ---
-        // 1. SBC'den gelen 'from_uri' var mı?
+        // --- IDENTITY RESOLUTION LOGIC (v1.15.0) ---
         let caller_id = if !req.from_uri.is_empty() {
             let extracted = self.extract_username(&req.from_uri);
-            info!("🆔 Identity Resolved via SIP Header: {} -> {}", req.from_uri, extracted);
+            info!("🆔 Identity Resolved: {} -> {}", req.from_uri, extracted);
             extracted
         } else {
-            // 2. Yoksa (Legacy SBC), kaynak IP'ye dön (Eski davranış, ama logla uyar)
-            warn!("⚠️ Missing 'from_uri' from SBC. Fallback to Source IP identity.");
-            if !req.source_ip.is_empty() { 
-                req.source_ip.clone() 
-            } else { 
-                "anonymous".to_string() 
-            }
+            warn!("⚠️ Missing 'from_uri' from source. Using IP fallback: {}", req.source_ip);
+            req.source_ip.clone()
         };
 
         // 1. REGISTER Yönlendirmesi
@@ -86,11 +78,11 @@ impl ProxyService for MyProxyService {
             }));
         }
 
-        // 2. DIALPLAN SORGUSU (Artık Gerçek Kimlikle)
+        // 2. DIALPLAN SORGUSU (Zenginleştirilmiş Kimlik ile)
         let mut clients = self.clients.lock().await;
         
         let dialplan_req = Request::new(ResolveDialplanRequest {
-            caller_contact_value: caller_id.clone(), // GERÇEK NUMARA BURADA
+            caller_contact_value: caller_id.clone(),
             destination_number: destination_user.clone(),
         });
 
@@ -105,12 +97,15 @@ impl ProxyService for MyProxyService {
             }
         };
 
-        let action_name = routing_decision.action.as_ref().map(|a| a.action.as_str()).unwrap_or("UNKNOWN");
-        info!("🧠 [DIALPLAN] Caller: {} -> Dest: {} => Action: {}", caller_id, destination_user, action_name);
+        // [v1.15.0 FIX]: Variant adı 'ActionTypeUnspecified' değil 'Unspecified' olmalıdır.
+        let action = routing_decision.action.as_ref().unwrap();
+        let action_type = ActionType::try_from(action.r#type).unwrap_or(ActionType::Unspecified);
+
+        info!("🧠 [DIALPLAN] Decision: {:?} for {} -> {}", action_type, caller_id, destination_user);
 
         // 3. AKSİYON MANTIĞI
-        match action_name {
-            "BRIDGE_CALL" => {
+        match action_type {
+            ActionType::BridgeCall => {
                 let lookup_req = Request::new(LookupContactRequest {
                     sip_uri: req.destination_uri.clone(),
                 });
@@ -123,21 +118,20 @@ impl ProxyService for MyProxyService {
                                 gateway_id: "sentiric-internal-user".to_string(),
                             }));
                         } else {
-                            warn!("⚠️ Internal user {} not found in Registrar. Sending to B2BUA Fallback.", destination_user);
+                            warn!("⚠️ Internal user {} not found. Sending to B2BUA Fallback.", destination_user);
                         }
                     },
                     Err(e) => error!("❌ Registrar Lookup Error: {}", e),
                 }
                 
-                // Offline fallback -> B2BUA (Sesli Posta vb.)
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-b2bua-fallback".to_string(),
                 }))
             },
             
+            // Unspecified, StartAiConversation, EchoTest, PlayStaticAnnouncement -> B2BUA
             _ => {
-                // AI, IVR, Outbound, Echo Test -> B2BUA
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-ai-gateway".to_string(),

@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-proxy-service"
-version = "1.4.1" # Patch güncellemesi: Identity Logic Fix
+version = "1.4.2"
 edition = "2021"
 
 [dependencies]
@@ -25,7 +25,6 @@ rand = "0.8"
 redis = { version = "0.26", features = ["tokio-rustls-comp"] }
 dashmap = "5.5"
 
-# --- THE IRON CORE ---
+# --- THE IRON CORE (UPGRADED) ---
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.1" }
-# GÜNCELLEME: v1.15.0 (from_uri desteği)
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.15.0" }
