@@ -8,8 +8,11 @@ use sentiric_contracts::sentiric::sip::v1::{
 use sentiric_contracts::sentiric::dialplan::v1::{
     ResolveDialplanRequest,
 };
+use sentiric_sip_core::SipUri;
+use std::str::FromStr;
+
 use tonic::{Request, Response, Status};
-use tracing::{info, warn, error, instrument};
+use tracing::{error, instrument};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::config::AppConfig;
@@ -25,26 +28,26 @@ impl MyProxyService {
         Self { config, clients }
     }
 
-    /// SIP URI'den kullanıcı adını (veya telefon numarasını) ayıklar.
-    /// Örn: "sip:1001@sentiric.cloud;user=phone" -> "1001"
-    fn extract_username(&self, uri: &str) -> String {
-        let clean = uri.trim();
-        // Şemayı at (sip: veya sips:)
-        let without_scheme = if let Some(idx) = clean.find(':') { &clean[idx+1..] } else { clean };
-        // Domain'i at (@ sonrası)
-        let user_part = if let Some(idx) = without_scheme.find('@') { &without_scheme[..idx] } else { without_scheme };
-        
-        // Parametreleri ve < > karakterlerini temizle
-        let pure_user = if let Some(idx) = user_part.find(';') { &user_part[..idx] } else { user_part };
-        
-        pure_user.replace('<', "").replace('>', "").trim().to_string()
+    /// SIP URI'den kullanıcı adını güvenli şekilde ayıklar.
+    fn extract_username(&self, uri_str: &str) -> String {
+        match SipUri::from_str(uri_str) {
+            Ok(uri) => uri.user.unwrap_or_else(|| "anonymous".to_string()),
+            Err(_) => {
+                let clean = uri_str.replace('<', "").replace('>', "");
+                if let Some(idx) = clean.find('@') {
+                    let start = clean.find(':').map(|i| i + 1).unwrap_or(0);
+                    clean[start..idx].to_string()
+                } else {
+                    clean
+                }
+            }
+        }
     }
 }
 
 #[tonic::async_trait]
 impl ProxyService for MyProxyService {
     
-    /// SBC tarafından çağrılır. Bir SIP paketinin nereye gideceğini söyler.
     #[instrument(skip_all, fields(dest = %request.get_ref().destination_uri, method = %request.get_ref().method))]
     async fn get_next_hop(
         &self,
@@ -53,96 +56,70 @@ impl ProxyService for MyProxyService {
         let req = request.into_inner();
         let destination_user = self.extract_username(&req.destination_uri);
         
-        // ---------------------------------------------------------------------
-        // 1. REGISTER İsteği (Özel Durum - Infrastructure Rule)
-        // ---------------------------------------------------------------------
-        // Kayıt istekleri her zaman yerel Proxy'nin SIP portuna (13074) gelmelidir.
-        // ProxyEngine, bu isteği alıp Registrar gRPC servisine çevirecektir.
+        // MİMARİ DÜZELTME: Arayan bilgisini (From) belirle
+        // source_ip bilgisi SBC tarafından iletilen fiziksel IP'dir.
+        // Dialplan'a gerçek arayanı (From) göndermeliyiz. 
+        // Şimdilik SBC'den From gelmediği için source_ip veya anonymous kullanılır.
+        // Ancak ileride kontrat güncellenerek FromUri eklenmelidir.
+        let caller_info = if req.source_ip.is_empty() { "anonymous".to_string() } else { req.source_ip.clone() };
+
         if req.method == "REGISTER" {
-            info!("📝 [ROUTE] REGISTER isteği -> Local Proxy (Registrar Gateway)");
             return Ok(Response::new(GetNextHopResponse {
-                uri: self.config.registrar_sip_addr.clone(), // Kendi adresimiz
+                uri: self.config.registrar_sip_addr.clone(),
                 gateway_id: "sentiric-registrar-local".to_string(),
             }));
         }
 
-        // ---------------------------------------------------------------------
-        // 2. DIALPLAN SORGUSU (Dynamic Routing)
-        // ---------------------------------------------------------------------
-        // Hard-code mantık kaldırıldı. Her şey Dialplan servisine sorulur.
         let mut clients = self.clients.lock().await;
         
-        // Arayan bilgisini (From) çözümlemek karmaşık olabilir, şimdilik "anonymous" 
-        // gönderiyoruz. Dialplan servisi bilinmeyen numaraları "Guest" olarak işler.
+        // Dialplan'a "Arayan Kim?" bilgisini gönderiyoruz.
         let dialplan_req = Request::new(ResolveDialplanRequest {
-            caller_contact_value: "anonymous".to_string(), 
+            caller_contact_value: caller_info, 
             destination_number: destination_user.clone(),
         });
 
-        // Dialplan servisine sor: "Bu numarayla ne yapayım?"
         let routing_decision = match clients.dialplan.resolve_dialplan(dialplan_req).await {
             Ok(res) => res.into_inner(),
             Err(e) => {
-                error!("❌ Dialplan servisine ulaşılamadı: {}", e);
-                // Fail-safe: Dialplan yoksa B2BUA'ya gönder (O da hata mesajı çalar)
+                error!("❌ Dialplan Service Error: {}", e);
                 return Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
-                    gateway_id: "sentiric-failsafe".to_string(),
+                    gateway_id: "sentiric-failsafe-b2bua".to_string(),
                 }));
             }
         };
 
-        // Dialplan'dan gelen aksiyonu al
         let action_name = routing_decision.action.as_ref().map(|a| a.action.as_str()).unwrap_or("UNKNOWN");
-        info!("🧠 [DIALPLAN] Karar: {} (Destination: {})", action_name, destination_user);
 
-        // ---------------------------------------------------------------------
-        // 3. AKSİYONA GÖRE YÖNLENDİRME
-        // ---------------------------------------------------------------------
         match action_name {
-            // A. DAHİLİ ARAMA (P2P - Bridge)
             "BRIDGE_CALL" => {
-                // Hedef bir iç abone. Registrar'a sorup anlık IP'sini bulmalıyız.
-                // Not: Dialplan servisi "MatchedUser" dönmüş olabilir ama güncel Contact URI için Registrar şarttır.
                 let lookup_req = Request::new(LookupContactRequest {
-                    sip_uri: req.destination_uri.clone(), // Tam SIP URI gönder
+                    sip_uri: req.destination_uri.clone(),
                 });
 
                 match clients.registrar.lookup_contact(lookup_req).await {
                     Ok(lookup_res) => {
-                        let uris = lookup_res.into_inner().contact_uris;
-                        // İlk bulunan contact adresine yönlendir
-                        if let Some(target_contact) = uris.first() {
-                            info!("🏠 [ROUTE] Dahili Abone Bulundu -> {}", target_contact);
+                        if let Some(target) = lookup_res.into_inner().contact_uris.first() {
                             return Ok(Response::new(GetNextHopResponse {
-                                uri: target_contact.clone(),
+                                uri: target.clone(),
                                 gateway_id: "sentiric-internal-user".to_string(),
-                            }));
-                        } else {
-                            warn!("⚠️ [ROUTE] Abone ({}) tanımlı ama Offline (Registrar boş döndü).", destination_user);
-                            // Offline ise B2BUA'ya at, sesli posta veya anons devreye girsin.
-                            return Ok(Response::new(GetNextHopResponse {
-                                uri: self.config.b2bua_sip_addr.clone(),
-                                gateway_id: "sentiric-offline-handler".to_string(),
                             }));
                         }
                     },
-                    Err(e) => {
-                        error!("❌ Registrar Lookup Hatası: {}", e);
-                        return Err(Status::internal("Registrar Error"));
-                    }
+                    Err(e) => error!("❌ Registrar error: {}", e),
                 }
+                
+                Ok(Response::new(GetNextHopResponse {
+                    uri: self.config.b2bua_sip_addr.clone(),
+                    gateway_id: "sentiric-b2bua-fallback".to_string(),
+                }))
             },
             
-            // B. DIŞ HAT veya AI KONUŞMASI (B2BUA)
-            // Echo Test, IVR, Dış Arama vb. hepsi B2BUA üzerinden yönetilir.
-            // Bu servisler medya (RTP) gerektirir ve stateful'dur.
             _ => {
-                info!("🤖 [ROUTE] İş Mantığı -> B2BUA");
-                return Ok(Response::new(GetNextHopResponse {
+                Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-ai-gateway".to_string(),
-                }));
+                }))
             }
         }
     }
