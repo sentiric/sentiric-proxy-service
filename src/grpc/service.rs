@@ -12,7 +12,7 @@ use sentiric_sip_core::SipUri;
 use std::str::FromStr;
 
 use tonic::{Request, Response, Status};
-use tracing::{info, error, instrument};
+use tracing::{info, error, warn, instrument};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::config::AppConfig;
@@ -49,7 +49,8 @@ impl ProxyService for MyProxyService {
     
     #[instrument(skip_all, fields(
         dest = %request.get_ref().destination_uri, 
-        method = %request.get_ref().method
+        method = %request.get_ref().method,
+        src_ip = %request.get_ref().source_ip
     ))]
     async fn get_next_hop(
         &self,
@@ -58,13 +59,26 @@ impl ProxyService for MyProxyService {
         let req = request.into_inner();
         let destination_user = self.extract_username(&req.destination_uri);
         
+        // Caller ID analizi
         let caller_id = if !req.from_uri.is_empty() {
             self.extract_username(&req.from_uri)
         } else {
             req.source_ip.clone()
         };
 
-        // 1. REGISTER -> Registrar
+        // --- SYSTEM ROUTES (ALTYAPI YÖNLENDİRMELERİ) ---
+        // Bu blok, Dialplan'ın "b2bua" -> "2" çevrim hatasını engeller.
+        
+        // 1. B2BUA Direct Route
+        if destination_user == "b2bua" {
+            info!("🔄 [ROUTING] System Route: Direct B2BUA targeting (Bypass Dialplan).");
+            return Ok(Response::new(GetNextHopResponse {
+                uri: self.config.b2bua_sip_addr.clone(),
+                gateway_id: "sentiric-b2bua-direct".to_string(),
+            }));
+        }
+
+        // 2. REGISTER -> Registrar
         if req.method == "REGISTER" {
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.registrar_sip_addr.clone(),
@@ -72,10 +86,8 @@ impl ProxyService for MyProxyService {
             }));
         }
 
-        // [DEĞİŞİKLİK]: Hardcoded B2BUA kontrolü kaldırıldı.
-        // Artık tüm INVITE/ACK/BYE istekleri Dialplan'a soruluyor.
+        // --- BUSINESS ROUTES (DIALPLAN - İŞ MANTIĞI) ---
         
-        // 2. DIALPLAN SORGUSU
         let mut clients = self.clients.lock().await;
         
         let dialplan_req = Request::new(ResolveDialplanRequest {
@@ -87,7 +99,7 @@ impl ProxyService for MyProxyService {
             Ok(res) => res.into_inner(),
             Err(e) => {
                 error!("❌ Dialplan Error: {}", e);
-                // Dialplan çalışmıyorsa failsafe: B2BUA
+                // Dialplan çökerse Failsafe
                 return Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-failsafe-b2bua".to_string(),
@@ -125,7 +137,6 @@ impl ProxyService for MyProxyService {
             },
             
             _ => {
-                // AI Çağrıları -> B2BUA
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-ai-gateway".to_string(),
