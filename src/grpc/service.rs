@@ -33,6 +33,7 @@ impl MyProxyService {
         match SipUri::from_str(uri_str) {
             Ok(uri) => uri.user.unwrap_or_else(|| "anonymous".to_string()),
             Err(_) => {
+                // Fallback parsing (Basit string manipülasyonu)
                 let clean = uri_str.replace('<', "").replace('>', "");
                 if let Some(idx) = clean.find('@') {
                     let start = clean.find(':').map(|i| i + 1).unwrap_or(0);
@@ -60,17 +61,32 @@ impl ProxyService for MyProxyService {
         let req = request.into_inner();
         let destination_user = self.extract_username(&req.destination_uri);
         
-        // --- IDENTITY RESOLUTION LOGIC (v1.15.0) ---
+        // --- IDENTITY RESOLUTION LOGIC ---
         let caller_id = if !req.from_uri.is_empty() {
             let extracted = self.extract_username(&req.from_uri);
-            info!("🆔 Identity Resolved: {} -> {}", req.from_uri, extracted);
+            // Log kirliliğini önlemek için sadece ilk INVITE'larda detay verilebilir
+            // info!("🆔 Identity Resolved: {} -> {}", req.from_uri, extracted);
             extracted
         } else {
             warn!("⚠️ Missing 'from_uri' from source. Using IP fallback: {}", req.source_ip);
             req.source_ip.clone()
         };
 
-        // 1. REGISTER Yönlendirmesi
+        // ---------------------------------------------------------------------
+        // 1. KRİTİK YÖNLENDİRME: B2BUA HEDEFİ (ACK/BYE Handle)
+        // ---------------------------------------------------------------------
+        // Eğer hedef doğrudan "b2bua" kullanıcısı ise (Contact header'dan gelir),
+        // Dialplan'a sormadan doğrudan B2BUA servisinin IP'sine yönlendir.
+        // Bu, 3-way handshake'in (ACK) tamamlanması için zorunludur.
+        if destination_user == "b2bua" {
+            info!("🔄 [ROUTING] Direct routing to B2BUA for user 'b2bua' (Method: {})", req.method);
+            return Ok(Response::new(GetNextHopResponse {
+                uri: self.config.b2bua_sip_addr.clone(),
+                gateway_id: "sentiric-b2bua-direct".to_string(),
+            }));
+        }
+
+        // 2. REGISTER Yönlendirmesi
         if req.method == "REGISTER" {
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.registrar_sip_addr.clone(),
@@ -78,7 +94,7 @@ impl ProxyService for MyProxyService {
             }));
         }
 
-        // 2. DIALPLAN SORGUSU (Zenginleştirilmiş Kimlik ile)
+        // 3. DIALPLAN SORGUSU (Standart Akış)
         let mut clients = self.clients.lock().await;
         
         let dialplan_req = Request::new(ResolveDialplanRequest {
@@ -90,6 +106,9 @@ impl ProxyService for MyProxyService {
             Ok(res) => res.into_inner(),
             Err(e) => {
                 error!("❌ Dialplan Service Error: {}", e);
+                // Hata durumunda failsafe olarak B2BUA'ya atmayı deneyebiliriz
+                // Ama genellikle 500 dönmesi daha doğrudur.
+                // Şimdilik failsafe route:
                 return Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-failsafe-b2bua".to_string(),
@@ -97,13 +116,12 @@ impl ProxyService for MyProxyService {
             }
         };
 
-        // [v1.15.0 FIX]: Variant adı 'ActionTypeUnspecified' değil 'Unspecified' olmalıdır.
         let action = routing_decision.action.as_ref().unwrap();
         let action_type = ActionType::try_from(action.r#type).unwrap_or(ActionType::Unspecified);
 
         info!("🧠 [DIALPLAN] Decision: {:?} for {} -> {}", action_type, caller_id, destination_user);
 
-        // 3. AKSİYON MANTIĞI
+        // 4. AKSİYON MANTIĞI
         match action_type {
             ActionType::BridgeCall => {
                 let lookup_req = Request::new(LookupContactRequest {
@@ -124,13 +142,14 @@ impl ProxyService for MyProxyService {
                     Err(e) => error!("❌ Registrar Lookup Error: {}", e),
                 }
                 
+                // Kullanıcı bulunamazsa B2BUA'ya düş (Belki sesli mesaj vs. vardır)
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-b2bua-fallback".to_string(),
                 }))
             },
             
-            // Unspecified, StartAiConversation, EchoTest, PlayStaticAnnouncement -> B2BUA
+            // Diğer tüm durumlar (AI, Echo, Anons) B2BUA tarafından yönetilir.
             _ => {
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
