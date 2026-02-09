@@ -62,27 +62,13 @@ impl ProxyService for MyProxyService {
         
         // --- IDENTITY RESOLUTION LOGIC (v1.15.0) ---
         let caller_id = if !req.from_uri.is_empty() {
-            let extracted = self.extract_username(&req.from_uri);
-            // Log kirliliğini azalttık
-            // info!("🆔 Identity Resolved: {} -> {}", req.from_uri, extracted);
-            extracted
+            self.extract_username(&req.from_uri)
         } else {
             warn!("⚠️ Missing 'from_uri' from source. Using IP fallback: {}", req.source_ip);
             req.source_ip.clone()
         };
 
-        // 1. KRİTİK: B2BUA Doğrudan Yönlendirme (ACK/BYE Fix)
-        // Eğer hedef "b2bua" ise, Dialplan'a sormadan doğrudan servise git.
-        // Çünkü Dialplan "b2bua" diye bir numara/kullanıcı tanımaz.
-        if destination_user == "b2bua" {
-            info!("🔄 [ROUTING] ACK/BYE detected for 'b2bua'. Direct routing to Service.");
-            return Ok(Response::new(GetNextHopResponse {
-                uri: self.config.b2bua_sip_addr.clone(),
-                gateway_id: "sentiric-b2bua-direct".to_string(),
-            }));
-        }
-
-        // 2. REGISTER Yönlendirmesi
+        // 1. REGISTER Yönlendirmesi (Standart İşlem)
         if req.method == "REGISTER" {
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.registrar_sip_addr.clone(),
@@ -90,7 +76,8 @@ impl ProxyService for MyProxyService {
             }));
         }
 
-        // 3. DIALPLAN SORGUSU
+        // 2. DIALPLAN SORGUSU (Merkezi Karar Mekanizması)
+        // [FIX]: Hardcoded "b2bua" kontrolü kaldırıldı. Artık tüm kararlar Dialplan servisinde.
         let mut clients = self.clients.lock().await;
         
         let dialplan_req = Request::new(ResolveDialplanRequest {
@@ -102,6 +89,7 @@ impl ProxyService for MyProxyService {
             Ok(res) => res.into_inner(),
             Err(e) => {
                 error!("❌ Dialplan Service Error: {}", e);
+                // Hata durumunda Failsafe olarak B2BUA'ya düşer
                 return Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-failsafe-b2bua".to_string(),
@@ -114,9 +102,10 @@ impl ProxyService for MyProxyService {
 
         info!("🧠 [DIALPLAN] Decision: {:?} for {} -> {}", action_type, caller_id, destination_user);
 
-        // 4. AKSİYON MANTIĞI
+        // 3. AKSİYON MANTIĞI
         match action_type {
             ActionType::BridgeCall => {
+                // Dahili arama: Hedefi Registrar'a sor
                 let lookup_req = Request::new(LookupContactRequest {
                     sip_uri: req.destination_uri.clone(),
                 });
@@ -135,13 +124,15 @@ impl ProxyService for MyProxyService {
                     Err(e) => error!("❌ Registrar Lookup Error: {}", e),
                 }
                 
+                // Bulunamazsa B2BUA'ya gönder (Voicemail vs için)
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-b2bua-fallback".to_string(),
                 }))
             },
             
-            // Unspecified, StartAiConversation, EchoTest, PlayStaticAnnouncement -> B2BUA
+            // StartAiConversation, EchoTest, PlayStaticAnnouncement -> HEPSİ B2BUA'ya GİDER
+            // B2BUA, gelen çağrıyı Dialplan'dan aldığı bilgiye göre işler.
             _ => {
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
