@@ -33,7 +33,6 @@ impl MyProxyService {
         match SipUri::from_str(uri_str) {
             Ok(uri) => uri.user.unwrap_or_else(|| "anonymous".to_string()),
             Err(_) => {
-                // Fallback parsing (Basit string manipülasyonu)
                 let clean = uri_str.replace('<', "").replace('>', "");
                 if let Some(idx) = clean.find('@') {
                     let start = clean.find(':').map(|i| i + 1).unwrap_or(0);
@@ -61,10 +60,10 @@ impl ProxyService for MyProxyService {
         let req = request.into_inner();
         let destination_user = self.extract_username(&req.destination_uri);
         
-        // --- IDENTITY RESOLUTION LOGIC ---
+        // --- IDENTITY RESOLUTION LOGIC (v1.15.0) ---
         let caller_id = if !req.from_uri.is_empty() {
             let extracted = self.extract_username(&req.from_uri);
-            // Log kirliliğini önlemek için sadece ilk INVITE'larda detay verilebilir
+            // Log kirliliğini azalttık
             // info!("🆔 Identity Resolved: {} -> {}", req.from_uri, extracted);
             extracted
         } else {
@@ -72,14 +71,11 @@ impl ProxyService for MyProxyService {
             req.source_ip.clone()
         };
 
-        // ---------------------------------------------------------------------
-        // 1. KRİTİK YÖNLENDİRME: B2BUA HEDEFİ (ACK/BYE Handle)
-        // ---------------------------------------------------------------------
-        // Eğer hedef doğrudan "b2bua" kullanıcısı ise (Contact header'dan gelir),
-        // Dialplan'a sormadan doğrudan B2BUA servisinin IP'sine yönlendir.
-        // Bu, 3-way handshake'in (ACK) tamamlanması için zorunludur.
+        // 1. KRİTİK: B2BUA Doğrudan Yönlendirme (ACK/BYE Fix)
+        // Eğer hedef "b2bua" ise, Dialplan'a sormadan doğrudan servise git.
+        // Çünkü Dialplan "b2bua" diye bir numara/kullanıcı tanımaz.
         if destination_user == "b2bua" {
-            info!("🔄 [ROUTING] Direct routing to B2BUA for user 'b2bua' (Method: {})", req.method);
+            info!("🔄 [ROUTING] ACK/BYE detected for 'b2bua'. Direct routing to Service.");
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.b2bua_sip_addr.clone(),
                 gateway_id: "sentiric-b2bua-direct".to_string(),
@@ -94,7 +90,7 @@ impl ProxyService for MyProxyService {
             }));
         }
 
-        // 3. DIALPLAN SORGUSU (Standart Akış)
+        // 3. DIALPLAN SORGUSU
         let mut clients = self.clients.lock().await;
         
         let dialplan_req = Request::new(ResolveDialplanRequest {
@@ -106,9 +102,6 @@ impl ProxyService for MyProxyService {
             Ok(res) => res.into_inner(),
             Err(e) => {
                 error!("❌ Dialplan Service Error: {}", e);
-                // Hata durumunda failsafe olarak B2BUA'ya atmayı deneyebiliriz
-                // Ama genellikle 500 dönmesi daha doğrudur.
-                // Şimdilik failsafe route:
                 return Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-failsafe-b2bua".to_string(),
@@ -142,14 +135,13 @@ impl ProxyService for MyProxyService {
                     Err(e) => error!("❌ Registrar Lookup Error: {}", e),
                 }
                 
-                // Kullanıcı bulunamazsa B2BUA'ya düş (Belki sesli mesaj vs. vardır)
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-b2bua-fallback".to_string(),
                 }))
             },
             
-            // Diğer tüm durumlar (AI, Echo, Anons) B2BUA tarafından yönetilir.
+            // Unspecified, StartAiConversation, EchoTest, PlayStaticAnnouncement -> B2BUA
             _ => {
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
