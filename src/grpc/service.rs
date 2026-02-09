@@ -12,7 +12,7 @@ use sentiric_sip_core::SipUri;
 use std::str::FromStr;
 
 use tonic::{Request, Response, Status};
-use tracing::{info, error, warn, instrument};
+use tracing::{info, error, instrument};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::config::AppConfig;
@@ -28,7 +28,6 @@ impl MyProxyService {
         Self { config, clients }
     }
 
-    /// SIP URI'den kullanıcı adını güvenli şekilde ayıklar.
     fn extract_username(&self, uri_str: &str) -> String {
         match SipUri::from_str(uri_str) {
             Ok(uri) => uri.user.unwrap_or_else(|| "anonymous".to_string()),
@@ -50,8 +49,7 @@ impl ProxyService for MyProxyService {
     
     #[instrument(skip_all, fields(
         dest = %request.get_ref().destination_uri, 
-        method = %request.get_ref().method,
-        src_ip = %request.get_ref().source_ip
+        method = %request.get_ref().method
     ))]
     async fn get_next_hop(
         &self,
@@ -60,15 +58,13 @@ impl ProxyService for MyProxyService {
         let req = request.into_inner();
         let destination_user = self.extract_username(&req.destination_uri);
         
-        // --- IDENTITY RESOLUTION LOGIC (v1.15.0) ---
         let caller_id = if !req.from_uri.is_empty() {
             self.extract_username(&req.from_uri)
         } else {
-            warn!("⚠️ Missing 'from_uri' from source. Using IP fallback: {}", req.source_ip);
             req.source_ip.clone()
         };
 
-        // 1. REGISTER Yönlendirmesi (Standart İşlem)
+        // 1. REGISTER -> Registrar
         if req.method == "REGISTER" {
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.registrar_sip_addr.clone(),
@@ -76,8 +72,10 @@ impl ProxyService for MyProxyService {
             }));
         }
 
-        // 2. DIALPLAN SORGUSU (Merkezi Karar Mekanizması)
-        // [FIX]: Hardcoded "b2bua" kontrolü kaldırıldı. Artık tüm kararlar Dialplan servisinde.
+        // [DEĞİŞİKLİK]: Hardcoded B2BUA kontrolü kaldırıldı.
+        // Artık tüm INVITE/ACK/BYE istekleri Dialplan'a soruluyor.
+        
+        // 2. DIALPLAN SORGUSU
         let mut clients = self.clients.lock().await;
         
         let dialplan_req = Request::new(ResolveDialplanRequest {
@@ -88,8 +86,8 @@ impl ProxyService for MyProxyService {
         let routing_decision = match clients.dialplan.resolve_dialplan(dialplan_req).await {
             Ok(res) => res.into_inner(),
             Err(e) => {
-                error!("❌ Dialplan Service Error: {}", e);
-                // Hata durumunda Failsafe olarak B2BUA'ya düşer
+                error!("❌ Dialplan Error: {}", e);
+                // Dialplan çalışmıyorsa failsafe: B2BUA
                 return Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-failsafe-b2bua".to_string(),
@@ -100,12 +98,10 @@ impl ProxyService for MyProxyService {
         let action = routing_decision.action.as_ref().unwrap();
         let action_type = ActionType::try_from(action.r#type).unwrap_or(ActionType::Unspecified);
 
-        info!("🧠 [DIALPLAN] Decision: {:?} for {} -> {}", action_type, caller_id, destination_user);
+        info!("🧠 [DIALPLAN] Action: {:?} Target: {}", action_type, destination_user);
 
-        // 3. AKSİYON MANTIĞI
         match action_type {
             ActionType::BridgeCall => {
-                // Dahili arama: Hedefi Registrar'a sor
                 let lookup_req = Request::new(LookupContactRequest {
                     sip_uri: req.destination_uri.clone(),
                 });
@@ -117,23 +113,19 @@ impl ProxyService for MyProxyService {
                                 uri: target.clone(),
                                 gateway_id: "sentiric-internal-user".to_string(),
                             }));
-                        } else {
-                            warn!("⚠️ Internal user {} not found. Sending to B2BUA Fallback.", destination_user);
                         }
                     },
-                    Err(e) => error!("❌ Registrar Lookup Error: {}", e),
+                    Err(_) => {}
                 }
                 
-                // Bulunamazsa B2BUA'ya gönder (Voicemail vs için)
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-b2bua-fallback".to_string(),
                 }))
             },
             
-            // StartAiConversation, EchoTest, PlayStaticAnnouncement -> HEPSİ B2BUA'ya GİDER
-            // B2BUA, gelen çağrıyı Dialplan'dan aldığı bilgiye göre işler.
             _ => {
+                // AI Çağrıları -> B2BUA
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-ai-gateway".to_string(),
