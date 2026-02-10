@@ -12,7 +12,7 @@ use sentiric_sip_core::SipUri;
 use std::str::FromStr;
 
 use tonic::{Request, Response, Status};
-use tracing::{info, error, warn, instrument};
+use tracing::{info, error, instrument};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::config::AppConfig;
