@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::Request;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 use dashmap::DashMap;
 
 pub type TransactionStore = Arc<DashMap<String, SipTransaction>>;
@@ -41,6 +41,48 @@ impl ProxyEngine {
 
     #[instrument(skip(self, packet))]
     pub async fn process_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
+        // --- 1. Loop Detection (RFC 3261 Section 16.3) ---
+        // Proxy kendi adresini Via headerlarında görürse, döngü var demektir.
+        let own_signature = format!("{}:{}", self.config.proxy_advertised_host, self.config.sip_port);
+        for via in &packet.headers {
+            if via.name == HeaderName::Via && via.value.contains(&own_signature) {
+                warn!("🔄 Loop Detected! Packet dropped. Signature found: {}", own_signature);
+                return Some((SipPacket::create_response_for(packet, 482, "Loop Detected".into()), Some(src_addr)));
+            }
+        }
+
+        // --- 2. Max-Forwards Check ---
+        // Her hop Max-Forwards değerini 1 azaltmalıdır.
+        if packet.is_request {
+            let mut mf_val = 70; // Default RFC değeri
+            let mut mf_idx = None;
+
+            for (i, h) in packet.headers.iter().enumerate() {
+                if h.name == HeaderName::MaxForwards {
+                    if let Ok(v) = h.value.parse::<i32>() {
+                        mf_val = v;
+                        mf_idx = Some(i);
+                    }
+                    break;
+                }
+            }
+
+            mf_val -= 1;
+            if mf_val <= 0 {
+                warn!("🛑 Max-Forwards reached 0. Dropping packet.");
+                return Some((SipPacket::create_response_for(packet, 483, "Too Many Hops".into()), Some(src_addr)));
+            }
+
+            // Header'ı güncelle
+            if let Some(idx) = mf_idx {
+                packet.headers[idx].value = mf_val.to_string();
+            } else {
+                // Eğer header yoksa ekle (opsiyonel ama iyi pratik)
+                packet.headers.push(sentiric_sip_core::Header::new(HeaderName::MaxForwards, mf_val.to_string()));
+            }
+        }
+
+        // --- 3. NAT Traversal & Processing ---
         if packet.is_request {
             SipRouter::fix_nat_via(packet, src_addr);
         }
@@ -116,7 +158,6 @@ impl ProxyEngine {
         let aor = sip_core_utils::extract_aor(&to_header);
         let username = sip_core_utils::extract_username_from_uri(&aor);
         
-        // NAT Traversal için gerçek client adresini çöz
         let via_val = packet.get_header_value(HeaderName::Via).cloned().unwrap_or_default();
         let client_addr = SipRouter::resolve_response_target(&via_val, DEFAULT_SIP_PORT).unwrap_or(src_addr);
         let real_contact_uri = format!("sip:{}@{}:{}", username, client_addr.ip(), client_addr.port());
@@ -144,11 +185,10 @@ impl ProxyEngine {
         }
     }
 
-    /// [E0599 FIX] RFC 3261 uyumlu Loose Routing işlemleri
     async fn handle_loose_routing(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
         if let Some(route_header) = packet.headers.iter().find(|h| h.name == HeaderName::Route).cloned() {
              if let Some(target_addr) = sip_core_utils::extract_socket_addr(&route_header.value) {
-                 packet.headers.retain(|h| h.name != HeaderName::Route); // Route header'ı tüket
+                 packet.headers.retain(|h| h.name != HeaderName::Route);
                  SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
                  return Some((packet.clone(), Some(target_addr)));
              }
