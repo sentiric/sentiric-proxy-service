@@ -25,6 +25,6 @@ rand = "0.8"
 redis = { version = "0.26", features = ["tokio-rustls-comp"] }
 dashmap = "5.5"
 
-# --- THE IRON CORE (UPGRADED) ---
-sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.2" }
+# --- THE IRON CORE ---
+sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.3" }
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.16.0" }
