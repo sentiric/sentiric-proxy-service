@@ -12,7 +12,7 @@ use sentiric_sip_core::SipUri;
 use std::str::FromStr;
 
 use tonic::{Request, Response, Status};
-use tracing::{info, error, instrument};
+use tracing::{info, error, instrument, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::config::AppConfig;
@@ -57,6 +57,31 @@ impl ProxyService for MyProxyService {
         request: Request<GetNextHopRequest>,
     ) -> Result<Response<GetNextHopResponse>, Status> {
         let req = request.into_inner();
+        let method = req.method.as_str();
+        
+        // --- 1. LOOSE ROUTING (RFC 3261) ---
+        // ACK, BYE, CANCEL gibi diyalog içi mesajlar Dialplan'a gitmez.
+        // Doğrudan hedefe (Route header veya Request-URI) gider.
+        if method == "ACK" || method == "BYE" || method == "CANCEL" {
+            // Basit Loose Routing: Eğer Request URI bir IP ise, doğrudan oraya gönder.
+            // Bu, B2BUA veya SBC'nin Contact header'ına yazdığı adrestir.
+            
+            // Eğer hedef "b2bua" veya "sbc" gibi bir alias değilse ve IP içeriyorsa:
+            if req.destination_uri.contains("@") && 
+               (req.destination_uri.contains(":") || req.destination_uri.contains(".")) {
+                
+                info!("⏩ [LOOSE-ROUTE] In-Dialog Request ({}) bypassing Dialplan. Target: {}", method, req.destination_uri);
+                
+                // URI'yi temizle ve doğrudan hedef olarak dön
+                let target_uri = req.destination_uri.replace('<', "").replace('>', "");
+                
+                return Ok(Response::new(GetNextHopResponse {
+                    uri: target_uri,
+                    gateway_id: "direct-route".to_string(),
+                }));
+            }
+        }
+
         let destination_user = self.extract_username(&req.destination_uri);
         
         // Caller ID analizi
@@ -67,11 +92,10 @@ impl ProxyService for MyProxyService {
         };
 
         // --- SYSTEM ROUTES (ALTYAPI YÖNLENDİRMELERİ) ---
-        // Bu blok, Dialplan'ın "b2bua" -> "2" çevrim hatasını engeller.
         
-        // 1. B2BUA Direct Route
+        // 1. B2BUA Direct Route (Eğer açıkça b2bua isteniyorsa)
         if destination_user == "b2bua" {
-            info!("🔄 [ROUTING] System Route: Direct B2BUA targeting (Bypass Dialplan).");
+            info!("🔄 [ROUTING] System Route: Direct B2BUA targeting.");
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.b2bua_sip_addr.clone(),
                 gateway_id: "sentiric-b2bua-direct".to_string(),
@@ -79,7 +103,7 @@ impl ProxyService for MyProxyService {
         }
 
         // 2. REGISTER -> Registrar
-        if req.method == "REGISTER" {
+        if method == "REGISTER" {
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.registrar_sip_addr.clone(),
                 gateway_id: "sentiric-registrar-local".to_string(),
@@ -87,6 +111,7 @@ impl ProxyService for MyProxyService {
         }
 
         // --- BUSINESS ROUTES (DIALPLAN - İŞ MANTIĞI) ---
+        // Sadece INVITE ve MESSAGE gibi başlangıç istekleri buraya gelir.
         
         let mut clients = self.clients.lock().await;
         
@@ -130,6 +155,7 @@ impl ProxyService for MyProxyService {
                     Err(_) => {}
                 }
                 
+                // Bulunamazsa B2BUA'ya at (Sesli mesaj vb. için)
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-b2bua-fallback".to_string(),
