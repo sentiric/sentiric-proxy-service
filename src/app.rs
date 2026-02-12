@@ -14,8 +14,6 @@ use tokio::sync::{mpsc, Mutex};
 use tonic::transport::Server as GrpcServer; 
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
-
-// [DÜZELTME] Hyper kütüphanesi eklendi (Cargo.toml'da var olmalı)
 use hyper::{
     service::{make_service_fn, service_fn},
     Body, Request, Response, Server as HttpServer, StatusCode,
@@ -45,10 +43,11 @@ impl App {
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        if config.env == "development" {
-            subscriber.with(fmt::layer().with_target(true).with_line_number(true)).init();
+        // [DEĞİŞİKLİK]
+        if config.env == "production" {
+            subscriber.with(fmt::layer().json()).init();
         } else {
-            subscriber.with(fmt::layer().json().with_current_span(true).with_span_list(true)).init();
+            subscriber.with(fmt::layer().compact()).init();
         }
 
         info!(
@@ -88,7 +87,7 @@ impl App {
 
         // 4. gRPC Sunucusunu Başlat (TCP/TLS)
         let grpc_config = self.config.clone();
-        let grpc_clients_clone = clients.clone(); // Servise client erişimi veriyoruz (Dialplan sorgusu için)
+        let grpc_clients_clone = clients.clone(); 
         
         let grpc_server_handle = tokio::spawn(async move {
             let tls_config = load_server_tls_config(&grpc_config).await.expect("TLS hatası");
