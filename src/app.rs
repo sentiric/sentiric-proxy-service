@@ -18,12 +18,13 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Request, Response, Server as HttpServer, StatusCode,
 };
+use std::time::Duration; // Time için gerekli
 
 pub struct App {
     config: Arc<AppConfig>,
 }
 
-// Basit Health Check Handler
+// Sağlık Kontrolü (Liveness Probe)
 async fn handle_http_request(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -34,16 +35,13 @@ async fn handle_http_request(_req: Request<Body>) -> Result<Response<Body>, Infa
 
 impl App {
     pub async fn bootstrap() -> Result<Self> {
-        // Ortam değişkenlerini yükle
         dotenvy::dotenv().ok();
         let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon yüklenemedi")?);
 
-        // Loglamayı başlat
         let rust_log_env = env::var("RUST_LOG").unwrap_or_else(|_| config.rust_log.clone());
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        // [DEĞİŞİKLİK]
         if config.env == "production" {
             subscriber.with(fmt::layer().json()).init();
         } else {
@@ -61,41 +59,41 @@ impl App {
     }
 
     pub async fn run(self) -> Result<()> {
-        // Kapatma sinyalleri için kanallar
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
         let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
 
-        // 1. Redis Bağlantısı (Stateful Proxy için kritik)
+        // 1. Redis Bağlantısı (Kritik - Bu olmadan proxy state tutamaz, o yüzden burada fail olabilir)
         info!("Redis'e bağlanılıyor: {}", self.config.redis_url);
         let redis_client = redis::Client::open(self.config.redis_url.as_str())
             .context("Redis URL hatalı")?;
-        let redis_conn = redis_client.get_multiplexed_async_connection().await
-            .context("Redis bağlantısı kurulamadı")?;
-        let redis_conn = Arc::new(Mutex::new(redis_conn));
         
-        // 2. Paylaşılan Durum ve gRPC İstemcileri
-        let clients = Arc::new(Mutex::new(InternalClients::connect(&self.config).await?));
-        let state = Arc::new(ProxyState::new()); 
+        // Redis için de basit bir retry loop koyalım
+        let redis_conn = loop {
+            match redis_client.get_multiplexed_async_connection().await {
+                Ok(conn) => break Arc::new(Mutex::new(conn)),
+                Err(e) => {
+                    error!("❌ Redis bağlantı hatası: {}. 5 saniye sonra tekrar denenecek...", e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        };
+        info!("✅ Redis bağlantısı sağlandı.");
 
-        // 3. SIP Sunucusunu Başlat (UDP)
-        let sip_config = self.config.clone();
-        let sip_server = SipServer::new(sip_config, clients.clone(), state, redis_conn).await?;
-        let sip_handle = tokio::spawn(async move {
-            sip_server.run(sip_shutdown_rx).await;
-        });
+        // 2. Paylaşılan İstemci Konteyneri (Başlangıçta Boş)
+        let clients_container = Arc::new(Mutex::new(None));
 
-        // 4. gRPC Sunucusunu Başlat (TCP/TLS)
+        // 3. gRPC Sunucusunu Başlat (ÖNCE SUNUCU!)
         let grpc_config = self.config.clone();
-        let grpc_clients_clone = clients.clone(); 
+        let grpc_clients_ref = clients_container.clone(); // Servise referansı veriyoruz
         
         let grpc_server_handle = tokio::spawn(async move {
             let tls_config = load_server_tls_config(&grpc_config).await.expect("TLS hatası");
             
-            // Servis oluşturulurken client manager da veriliyor
-            let grpc_service = MyProxyService::new(grpc_config.clone(), grpc_clients_clone); 
+            // Servis artık Option<Clients> kabul ediyor
+            let grpc_service = MyProxyService::new(grpc_config.clone(), grpc_clients_ref); 
             
-            info!(address = %grpc_config.grpc_listen_addr, "gRPC sunucusu başlatılıyor...");
+            info!(address = %grpc_config.grpc_listen_addr, "🔐 gRPC sunucusu dinlemeye başlıyor...");
             
             GrpcServer::builder()
                 .tls_config(tls_config).expect("TLS yapılandırma hatası")
@@ -107,7 +105,58 @@ impl App {
                 .context("gRPC sunucusu çöktü")
         });
 
-        // 5. HTTP Sunucusunu Başlat (Health Check)
+        // 4. Bağlantı Yöneticisi (Connection Manager Loop)
+        // Bu blok, gRPC sunucusu ayağa kalktıktan sonra çalışır ve bağımlılıklara bağlanır.
+        let config_clone = self.config.clone();
+        let clients_container_clone = clients_container.clone(); // Doldurmak için referans
+        let sip_shutdown_tx_clone = sip_shutdown_tx.clone();
+        let redis_conn_clone = redis_conn.clone();
+        
+        // Ana akışı bloklamamak için spawn ediyoruz, ama SIP sunucusu buna bağlı.
+        // Düzeltme: SIP sunucusu da clients'a ihtiyaç duyar.
+        // Bu yüzden SIP sunucusunu başlatmadan önce bağlantıların kurulmasını beklemeliyiz (veya SIP sunucusu da lazy olmalı).
+        // SIP Sunucusu "InternalClients" tipini istiyor, Option değil.
+        // Bu yüzden burada BLOKLAYARAK (await) bağlantıyı bekleyeceğiz.
+        // gRPC sunucusu ayrı thread'de olduğu için sorun olmaz.
+
+        info!("⏳ Bağımlı servislere (Loopback dahil) bağlanılıyor...");
+        
+        // Sunucunun socket bind etmesi için kısa bir avans verelim
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let connected_clients = loop {
+            match InternalClients::connect(&config_clone).await {
+                Ok(c) => {
+                    info!("✅ Tüm bağımlı servislere (Dialplan, Registrar, Loopback) başarıyla bağlanıldı.");
+                    break c;
+                },
+                Err(e) => {
+                    warn!("⚠️ Bağlantı hatası (Retry in 5s): {}", e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        };
+
+        // Bağlantı nesnesini servise enjekte et (Artık servis "unavailable" dönmeyi bırakacak)
+        {
+            let mut guard = clients_container_clone.lock().await;
+            *guard = Some(connected_clients.clone());
+        }
+
+        // 5. SIP Sunucusunu Başlat (UDP)
+        // Artık elimizde sağlam bir 'connected_clients' var.
+        let sip_config = self.config.clone();
+        let state = Arc::new(ProxyState::new()); 
+        
+        // SIP Engine için Mutex içine alıyoruz
+        let sip_clients = Arc::new(Mutex::new(connected_clients));
+
+        let sip_server = SipServer::new(sip_config, sip_clients, state, redis_conn_clone).await?;
+        let sip_handle = tokio::spawn(async move {
+            sip_server.run(sip_shutdown_rx).await;
+        });
+
+        // 6. HTTP Sunucusu (Health Check)
         let http_config = self.config.clone();
         let http_server_handle = tokio::spawn(async move {
             let addr = http_config.http_listen_addr;
@@ -117,11 +166,11 @@ impl App {
             let server = HttpServer::bind(&addr).serve(make_svc).with_graceful_shutdown(async {
                 http_shutdown_rx.await.ok();
             });
-            info!(address = %addr, "HTTP sağlık kontrolü aktif.");
+            info!(address = %addr, "🏥 HTTP sağlık kontrolü aktif.");
             if let Err(e) = server.await { error!(error = %e, "HTTP sunucusu hatası"); }
         });
 
-        // Kapatma Sinyali Bekle (Ctrl+C)
+        // Kapanış Sinyali
         let ctrl_c = async { tokio::signal::ctrl_c().await.expect("Ctrl+C hatası"); };
         
         tokio::select! {
@@ -131,9 +180,9 @@ impl App {
             _ = ctrl_c => { warn!("Kapatma sinyali alındı."); },
         }
 
-        // Graceful Shutdown Tetikle
+        // Temizlik
         let _ = shutdown_tx.send(()).await;
-        let _ = sip_shutdown_tx.send(()).await;
+        let _ = sip_shutdown_tx_clone.send(()).await; // Clone kullanıyoruz çünkü orijinal move oldu
         let _ = http_shutdown_tx.send(());
         
         info!("Servis durduruldu.");
