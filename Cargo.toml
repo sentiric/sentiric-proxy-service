@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-proxy-service"
-version = "1.4.3"
+version = "1.5.0" # Mimari değişikliği yansıtan minor versiyon artışı
 edition = "2021"
 
 [dependencies]
@@ -25,6 +25,6 @@ rand = "0.8"
 redis = { version = "0.26", features = ["tokio-rustls-comp"] }
 dashmap = "5.5"
 
-# --- THE IRON CORE ---
-sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.3" }
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.16.0" }
+# --- THE IRON CORE (UPDATED) ---
+sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.5.1" }
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.17.0" }

@@ -8,11 +8,10 @@ use sentiric_contracts::sentiric::sip::v1::{
 use sentiric_contracts::sentiric::dialplan::v1::{
     ResolveDialplanRequest, ActionType
 };
-use sentiric_sip_core::SipUri;
-use std::str::FromStr;
+use sentiric_sip_core::utils as sip_utils;
 
 use tonic::{Request, Response, Status};
-use tracing::{info, error, instrument, warn};
+use tracing::{info, error, instrument, debug};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::config::AppConfig;
@@ -27,21 +26,6 @@ impl MyProxyService {
     pub fn new(config: Arc<AppConfig>, clients: Arc<Mutex<InternalClients>>) -> Self {
         Self { config, clients }
     }
-
-    fn extract_username(&self, uri_str: &str) -> String {
-        match SipUri::from_str(uri_str) {
-            Ok(uri) => uri.user.unwrap_or_else(|| "anonymous".to_string()),
-            Err(_) => {
-                let clean = uri_str.replace('<', "").replace('>', "");
-                if let Some(idx) = clean.find('@') {
-                    let start = clean.find(':').map(|i| i + 1).unwrap_or(0);
-                    clean[start..idx].to_string()
-                } else {
-                    clean
-                }
-            }
-        }
-    }
 }
 
 #[tonic::async_trait]
@@ -50,122 +34,82 @@ impl ProxyService for MyProxyService {
     #[instrument(skip_all, fields(
         dest = %request.get_ref().destination_uri, 
         method = %request.get_ref().method,
-        src_ip = %request.get_ref().source_ip
+        in_dialog = %request.get_ref().is_in_dialog
     ))]
     async fn get_next_hop(
         &self,
         request: Request<GetNextHopRequest>,
     ) -> Result<Response<GetNextHopResponse>, Status> {
         let req = request.into_inner();
-        let method = req.method.as_str();
         
-        // --- 1. LOOSE ROUTING (RFC 3261) ---
-        // ACK, BYE, CANCEL gibi diyalog içi mesajlar Dialplan'a gitmez.
-        // Doğrudan hedefe (Route header veya Request-URI) gider.
-        if method == "ACK" || method == "BYE" || method == "CANCEL" {
-            // Basit Loose Routing: Eğer Request URI bir IP ise, doğrudan oraya gönder.
-            // Bu, B2BUA veya SBC'nin Contact header'ına yazdığı adrestir.
-            
-            // Eğer hedef "b2bua" veya "sbc" gibi bir alias değilse ve IP içeriyorsa:
-            if req.destination_uri.contains("@") && 
-               (req.destination_uri.contains(":") || req.destination_uri.contains(".")) {
-                
-                info!("⏩ [LOOSE-ROUTE] In-Dialog Request ({}) bypassing Dialplan. Target: {}", method, req.destination_uri);
-                
-                // URI'yi temizle ve doğrudan hedef olarak dön
-                let target_uri = req.destination_uri.replace('<', "").replace('>', "");
-                
-                return Ok(Response::new(GetNextHopResponse {
-                    uri: target_uri,
-                    gateway_id: "direct-route".to_string(),
-                }));
-            }
-        }
-
-        let destination_user = self.extract_username(&req.destination_uri);
-        
-        // Caller ID analizi
-        let caller_id = if !req.from_uri.is_empty() {
-            self.extract_username(&req.from_uri)
-        } else {
-            req.source_ip.clone()
-        };
-
-        // --- SYSTEM ROUTES (ALTYAPI YÖNLENDİRMELERİ) ---
-        
-        // 1. B2BUA Direct Route (Eğer açıkça b2bua isteniyorsa)
-        if destination_user == "b2bua" {
-            info!("🔄 [ROUTING] System Route: Direct B2BUA targeting.");
+        // --- [CRITICAL REFACTOR] ---
+        // 1. In-Dialog ise, Dialplan'ı bypass et ve doğrudan hedefe git (Loose Routing)
+        if req.is_in_dialog {
+            debug!("⏩ [LOOSE-ROUTE] In-Dialog Request ({}) bypassing Dialplan.", req.method);
+            let target_uri = req.destination_uri.replace('<', "").replace('>', "");
             return Ok(Response::new(GetNextHopResponse {
-                uri: self.config.b2bua_sip_addr.clone(),
-                gateway_id: "sentiric-b2bua-direct".to_string(),
+                uri: target_uri,
+                gateway_id: "direct-route-in-dialog".to_string(),
             }));
         }
 
-        // 2. REGISTER -> Registrar
-        if method == "REGISTER" {
+        // 2. REGISTER ise, Registrar'a git
+        if req.method == "REGISTER" {
+            debug!("⏩ [SYSTEM-ROUTE] REGISTER request routed to Registrar.");
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.registrar_sip_addr.clone(),
                 gateway_id: "sentiric-registrar-local".to_string(),
             }));
         }
-
-        // --- BUSINESS ROUTES (DIALPLAN - İŞ MANTIĞI) ---
-        // Sadece INVITE ve MESSAGE gibi başlangıç istekleri buraya gelir.
+        
+        // --- Sadece yeni diyaloglar (örn: INVITE) için Dialplan sorgusu ---
+        let destination_user = sip_utils::extract_username_from_uri(&req.destination_uri);
+        let caller_id = sip_utils::extract_username_from_uri(&req.from_uri);
         
         let mut clients = self.clients.lock().await;
         
         let dialplan_req = Request::new(ResolveDialplanRequest {
-            caller_contact_value: caller_id.clone(),
+            caller_contact_value: caller_id,
             destination_number: destination_user.clone(),
         });
 
-        let routing_decision = match clients.dialplan.resolve_dialplan(dialplan_req).await {
-            Ok(res) => res.into_inner(),
+        match clients.dialplan.resolve_dialplan(dialplan_req).await {
+            Ok(res) => {
+                let resolution = res.into_inner();
+                let action = resolution.action.as_ref().unwrap();
+                let action_type = ActionType::try_from(action.r#type).unwrap_or(ActionType::Unspecified);
+                info!("🧠 [DIALPLAN] Action: {:?}", action_type);
+
+                match action_type {
+                    ActionType::BridgeCall => {
+                        let lookup_req = Request::new(LookupContactRequest { sip_uri: req.destination_uri });
+                        if let Ok(lookup_res) = clients.registrar.lookup_contact(lookup_req).await {
+                            if let Some(target) = lookup_res.into_inner().contact_uris.first() {
+                                return Ok(Response::new(GetNextHopResponse {
+                                    uri: target.clone(),
+                                    gateway_id: "sentiric-internal-user".to_string(),
+                                }));
+                            }
+                        }
+                        // Fallback
+                        Ok(Response::new(GetNextHopResponse {
+                            uri: self.config.b2bua_sip_addr.clone(),
+                            gateway_id: "sentiric-b2bua-fallback".to_string(),
+                        }))
+                    },
+                    _ => { // Diğer tüm aksiyonlar (Echo, AI vb.) B2BUA'ya
+                        Ok(Response::new(GetNextHopResponse {
+                            uri: self.config.b2bua_sip_addr.clone(),
+                            gateway_id: "sentiric-ai-gateway".to_string(),
+                        }))
+                    }
+                }
+            },
             Err(e) => {
-                error!("❌ Dialplan Error: {}", e);
-                // Dialplan çökerse Failsafe
-                return Ok(Response::new(GetNextHopResponse {
+                error!("❌ Dialplan Error: {}. Failsafe to B2BUA.", e);
+                Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-failsafe-b2bua".to_string(),
-                }));
-            }
-        };
-
-        let action = routing_decision.action.as_ref().unwrap();
-        let action_type = ActionType::try_from(action.r#type).unwrap_or(ActionType::Unspecified);
-
-        info!("🧠 [DIALPLAN] Action: {:?} Target: {}", action_type, destination_user);
-
-        match action_type {
-            ActionType::BridgeCall => {
-                let lookup_req = Request::new(LookupContactRequest {
-                    sip_uri: req.destination_uri.clone(),
-                });
-
-                match clients.registrar.lookup_contact(lookup_req).await {
-                    Ok(lookup_res) => {
-                        if let Some(target) = lookup_res.into_inner().contact_uris.first() {
-                            return Ok(Response::new(GetNextHopResponse {
-                                uri: target.clone(),
-                                gateway_id: "sentiric-internal-user".to_string(),
-                            }));
-                        }
-                    },
-                    Err(_) => {}
-                }
-                
-                // Bulunamazsa B2BUA'ya at (Sesli mesaj vb. için)
-                Ok(Response::new(GetNextHopResponse {
-                    uri: self.config.b2bua_sip_addr.clone(),
-                    gateway_id: "sentiric-b2bua-fallback".to_string(),
-                }))
-            },
-            
-            _ => {
-                Ok(Response::new(GetNextHopResponse {
-                    uri: self.config.b2bua_sip_addr.clone(),
-                    gateway_id: "sentiric-ai-gateway".to_string(),
                 }))
             }
         }

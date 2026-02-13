@@ -2,9 +2,6 @@
 
 use sentiric_sip_core::{SipPacket, HeaderName};
 
-// DİKKAT: extract_aor fonksiyonu buradan SİLİNDİ.
-// Artık sip-core'daki versiyonu kullanacağız.
-
 pub fn get_header(packet: &SipPacket, name: HeaderName) -> String {
     packet.get_header_value(name).cloned().unwrap_or_default()
 }
