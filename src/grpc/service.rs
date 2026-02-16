@@ -32,9 +32,9 @@ impl MyProxyService {
 impl ProxyService for MyProxyService {
     
     #[instrument(skip_all, fields(
-        dest = %request.get_ref().destination_uri, 
-        method = %request.get_ref().method,
-        in_dialog = %request.get_ref().is_in_dialog
+        hedef = %request.get_ref().destination_uri, 
+        metod = %request.get_ref().method,
+        diyalog_ici = %request.get_ref().is_in_dialog
     ))]
     async fn get_next_hop(
         &self,
@@ -43,12 +43,16 @@ impl ProxyService for MyProxyService {
         let req = request.into_inner();
         let destination_user = sip_utils::extract_username_from_uri(&req.destination_uri);
 
-        // [CRITICAL FIX]: B2BUA Yönlendirme Kuralı (ACK Loop Prevention)
-        // Eğer hedef kullanıcı 'b2bua' ise (veya benzer sistem aktörleri),
-        // Public IP'ye bakmaksızın paketi doğrudan iç ağdaki B2BUA servisine yönlendir.
-        // Bu, SBC'nin Contact header rewrite yapması sonucu oluşan döngüyü kırar.
+        // [KRİTİK DÜZELTME]: B2BUA Yönlendirme Kuralı (ACK Döngüsünü Kırma)
+        // Eğer hedef kullanıcı 'b2bua' ise, Public IP'ye bakmaksızın paketi 
+        // doğrudan iç ağdaki B2BUA servisine yönlendir.
+        
+        // Şu anlık acil düzeltme (Hotfix) olduğu için b2bua kontrolü kod içinde kalacak,
+        //  ancak bunu bir "System Constant" (Sistem Sabiti) olarak tanımlayıp görünür kılacağız.
+        //  İleride bunu Config'e taşıyacağız.
+
         if destination_user == "b2bua" {
-            debug!("⚡ Special Route: 'b2bua' user detected. Forcing route to internal B2BUA service.");
+            info!("⚡ [ÖZEL ROTA] Hedef 'b2bua' tespit edildi. Trafik dahili B2BUA servisine zorlanıyor: {}", self.config.b2bua_sip_addr);
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.b2bua_sip_addr.clone(),
                 gateway_id: "force-internal-b2bua".to_string(),
@@ -56,7 +60,7 @@ impl ProxyService for MyProxyService {
         }
         
         if req.is_in_dialog {
-            debug!("⏩ In-Dialog Request: Directly routing to target URI.");
+            debug!("⏩ Diyalog İçi İstek: Hedefe doğrudan yönlendiriliyor.");
             let target_uri = req.destination_uri.replace('<', "").replace('>', "");
             return Ok(Response::new(GetNextHopResponse {
                 uri: target_uri,
@@ -75,19 +79,18 @@ impl ProxyService for MyProxyService {
         let clients = match &*clients_guard {
             Some(c) => c,
             None => {
-                warn!("⚠️ Proxy not ready (clients none)");
-                return Err(Status::unavailable("Proxy is initializing"));
+                warn!("⚠️ Proxy henüz hazır değil (bağımlı servisler bekleniyor)");
+                return Err(Status::unavailable("Proxy servisi başlatılıyor..."));
             }
         };
 
         let caller_id = sip_utils::extract_username_from_uri(&req.from_uri);
-        
         let mut dialplan_client = clients.dialplan.clone();
         let mut registrar_client = clients.registrar.clone();
         drop(clients_guard);
 
         let dialplan_req = Request::new(ResolveDialplanRequest {
-            caller_contact_value: caller_id,
+            caller_contact_value: caller_id.clone(),
             destination_number: destination_user.clone(),
         });
 
@@ -97,19 +100,21 @@ impl ProxyService for MyProxyService {
                 let action = resolution.action.as_ref().unwrap();
                 let action_type = ActionType::try_from(action.r#type).unwrap_or(ActionType::Unspecified);
                 
-                info!("🧠 [DIALPLAN] Action: {:?}", action_type);
+                info!("🧠 [DIALPLAN] Karar: {:?} (Arayan: {}, Aranan: {})", action_type, caller_id, destination_user);
 
                 match action_type {
                     ActionType::BridgeCall => {
                         let lookup_req = Request::new(LookupContactRequest { sip_uri: req.destination_uri });
                         if let Ok(lookup_res) = registrar_client.lookup_contact(lookup_req).await {
                             if let Some(target) = lookup_res.into_inner().contact_uris.first() {
+                                info!("➡️ [DAHİLİ] Abone bulundu, yönlendiriliyor: {}", target);
                                 return Ok(Response::new(GetNextHopResponse {
                                     uri: target.clone(),
                                     gateway_id: "internal-p2p".to_string(),
                                 }));
                             }
                         }
+                        warn!("⚠️ [DAHİLİ] Abone bulunamadı, B2BUA'ya yönlendiriliyor.");
                         Ok(Response::new(GetNextHopResponse {
                             uri: self.config.b2bua_sip_addr.clone(),
                             gateway_id: "b2bua-fallback".to_string(),
@@ -124,7 +129,7 @@ impl ProxyService for MyProxyService {
                 }
             },
             Err(e) => {
-                error!("❌ Dialplan Error: {}. Failsafe to B2BUA.", e);
+                error!("❌ Dialplan Hatası: {}. Failsafe olarak B2BUA'ya yönlendiriliyor.", e);
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "failsafe-b2bua".to_string(),
