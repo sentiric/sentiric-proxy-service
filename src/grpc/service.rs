@@ -11,7 +11,6 @@ use sentiric_contracts::sentiric::dialplan::v1::{
 use sentiric_sip_core::utils as sip_utils;
 
 use tonic::{Request, Response, Status};
-// [FIX]: Kullanılan makrolar: info, error, debug, warn
 use tracing::{info, error, instrument, debug, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -42,9 +41,22 @@ impl ProxyService for MyProxyService {
         request: Request<GetNextHopRequest>,
     ) -> Result<Response<GetNextHopResponse>, Status> {
         let req = request.into_inner();
+        let destination_user = sip_utils::extract_username_from_uri(&req.destination_uri);
+
+        // [CRITICAL FIX]: B2BUA Yönlendirme Kuralı (ACK Loop Prevention)
+        // Eğer hedef kullanıcı 'b2bua' ise (veya benzer sistem aktörleri),
+        // Public IP'ye bakmaksızın paketi doğrudan iç ağdaki B2BUA servisine yönlendir.
+        // Bu, SBC'nin Contact header rewrite yapması sonucu oluşan döngüyü kırar.
+        if destination_user == "b2bua" {
+            debug!("⚡ Special Route: 'b2bua' user detected. Forcing route to internal B2BUA service.");
+            return Ok(Response::new(GetNextHopResponse {
+                uri: self.config.b2bua_sip_addr.clone(),
+                gateway_id: "force-internal-b2bua".to_string(),
+            }));
+        }
         
         if req.is_in_dialog {
-            debug!("⏩ In-Dialog Request: Directly routing to target.");
+            debug!("⏩ In-Dialog Request: Directly routing to target URI.");
             let target_uri = req.destination_uri.replace('<', "").replace('>', "");
             return Ok(Response::new(GetNextHopResponse {
                 uri: target_uri,
@@ -68,7 +80,6 @@ impl ProxyService for MyProxyService {
             }
         };
 
-        let destination_user = sip_utils::extract_username_from_uri(&req.destination_uri);
         let caller_id = sip_utils::extract_username_from_uri(&req.from_uri);
         
         let mut dialplan_client = clients.dialplan.clone();
@@ -86,7 +97,6 @@ impl ProxyService for MyProxyService {
                 let action = resolution.action.as_ref().unwrap();
                 let action_type = ActionType::try_from(action.r#type).unwrap_or(ActionType::Unspecified);
                 
-                // [FIX]: info makrosu burada kullanılıyor.
                 info!("🧠 [DIALPLAN] Action: {:?}", action_type);
 
                 match action_type {
