@@ -41,23 +41,18 @@ impl ProxyService for MyProxyService {
         request: Request<GetNextHopRequest>,
     ) -> Result<Response<GetNextHopResponse>, Status> {
         let req = request.into_inner();
-        let destination_user = sip_utils::extract_username_from_uri(&req.destination_uri);
+        let destination_user = sip_utils::extract_username_from_uri(&req.destination_uri).to_lowercase();
 
-        // [KRİTİK DÜZELTME]: B2BUA Yönlendirme Kuralı (ACK Döngüsünü Kırma)
-        // Eğer hedef kullanıcı 'b2bua' ise, Public IP'ye bakmaksızın paketi 
-        // doğrudan iç ağdaki B2BUA servisine yönlendir.
-        
-        // Şu anlık acil düzeltme (Hotfix) olduğu için b2bua kontrolü kod içinde kalacak,
-        //  ancak bunu bir "System Constant" (Sistem Sabiti) olarak tanımlayıp görünür kılacağız.
-        //  İleride bunu Config'e taşıyacağız.
-
-        if destination_user == "b2bua" {
-            info!("⚡ [ÖZEL ROTA] Hedef 'b2bua' tespit edildi. Trafik dahili B2BUA servisine zorlanıyor: {}", self.config.b2bua_sip_addr);
+        // --- [BORÇ ÖDENDİ]: DİNAMİK İÇ SERVİS YÖNLENDİRMESİ ---
+        if self.config.internal_service_users.contains(&destination_user) {
+            info!("⚡ [CORE-ROUTING] Dahili servis kullanıcısı tespit edildi: {}. Yönlendirme: {}", 
+                destination_user, self.config.b2bua_sip_addr);
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.b2bua_sip_addr.clone(),
-                gateway_id: "force-internal-b2bua".to_string(),
+                gateway_id: format!("core-internal-{}", destination_user),
             }));
         }
+        // -----------------------------------------------------
         
         if req.is_in_dialog {
             debug!("⏩ Diyalog İçi İstek: Hedefe doğrudan yönlendiriliyor.");
@@ -97,7 +92,7 @@ impl ProxyService for MyProxyService {
         match dialplan_client.resolve_dialplan(dialplan_req).await {
             Ok(res) => {
                 let resolution = res.into_inner();
-                let action = resolution.action.as_ref().unwrap();
+                let action = resolution.action.as_ref().ok_or_else(|| Status::internal("Dialplan action missing"))?;
                 let action_type = ActionType::try_from(action.r#type).unwrap_or(ActionType::Unspecified);
                 
                 info!("🧠 [DIALPLAN] Karar: {:?} (Arayan: {}, Aranan: {})", action_type, caller_id, destination_user);
@@ -107,14 +102,12 @@ impl ProxyService for MyProxyService {
                         let lookup_req = Request::new(LookupContactRequest { sip_uri: req.destination_uri });
                         if let Ok(lookup_res) = registrar_client.lookup_contact(lookup_req).await {
                             if let Some(target) = lookup_res.into_inner().contact_uris.first() {
-                                info!("➡️ [DAHİLİ] Abone bulundu, yönlendiriliyor: {}", target);
                                 return Ok(Response::new(GetNextHopResponse {
                                     uri: target.clone(),
                                     gateway_id: "internal-p2p".to_string(),
                                 }));
                             }
                         }
-                        warn!("⚠️ [DAHİLİ] Abone bulunamadı, B2BUA'ya yönlendiriliyor.");
                         Ok(Response::new(GetNextHopResponse {
                             uri: self.config.b2bua_sip_addr.clone(),
                             gateway_id: "b2bua-fallback".to_string(),
