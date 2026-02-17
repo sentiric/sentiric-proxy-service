@@ -8,7 +8,8 @@ use crate::grpc::service::MyProxyService;
 use sentiric_sip_core::{
     HeaderName, Method, SipPacket,
     SipRouter,
-    TransactionEngine, TransactionAction, SipTransaction
+    TransactionEngine, TransactionAction, SipTransaction,
+    utils as sip_core_utils // [KRİTİK]: Yardımcı fonksiyonlar için
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -95,12 +96,19 @@ impl ProxyEngine {
                 let inner_res = res.into_inner();
                 let next_hop_uri = inner_res.uri; 
 
-                // [UYARI GİDERİLDİ]: state.resolve_addr kullanılıyor.
-                let target_addr = match self.state.resolve_addr(&next_hop_uri).await {
-                    Ok(addr) => Some(addr),
-                    Err(e) => {
-                        error!("❌ Hedef çözümlenemedi ({}): {}", next_hop_uri, e);
-                        None
+                // [KRİTİK DÜZELTME]: SIP URI'den temiz host:port ayıklama
+                // "sip:user@host:port;params" -> "host:port"
+                let target_addr = if let Some(extracted_socket) = sip_core_utils::extract_socket_addr(&next_hop_uri) {
+                    // Eğer zaten bir IP:Port ise doğrudan kullan (DNS'e sorma)
+                    Some(extracted_socket)
+                } else {
+                    // Eğer bir hostname ise DNS'e sor
+                    match self.state.resolve_addr(&next_hop_uri).await {
+                        Ok(addr) => Some(addr),
+                        Err(e) => {
+                            error!("❌ Hedef çözümlenemedi ({}): {}", next_hop_uri, e);
+                            None
+                        }
                     }
                 };
 
@@ -109,9 +117,10 @@ impl ProxyEngine {
                         SipRouter::add_record_route(packet, &self.config.proxy_advertised_host, self.config.sip_port);
                     }
                     SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
-                    info!("🚀 Paket hedefe yönlendiriliyor ({}): {}", packet.method, target);
+                    info!("🚀 Paket yönlendiriliyor ({}): {}", packet.method, target);
                     return Some((packet.clone(), Some(target)));
                 } else {
+                    error!("🔥 Hedef erişilemez durumda: {}", next_hop_uri);
                     return Some((SipPacket::create_response_for(packet, 404, "Not Found".into()), Some(src_addr)));
                 }
             },
