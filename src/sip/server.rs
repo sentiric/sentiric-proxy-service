@@ -1,10 +1,10 @@
 // sentiric-proxy-service/src/sip/server.rs
 
 use crate::config::AppConfig;
-use crate::grpc::client::InternalClients;
+// [SİLİNDİ] use crate::grpc::client::InternalClients;
 use crate::sip::engine::ProxyEngine;
-// DÜZELTME: RedisConn doğru yerden (handlers::routing) çağrılıyor
 use crate::sip::handlers::routing::RedisConn; 
+use crate::grpc::service::MyProxyService;
 use anyhow::{anyhow, Result};
 use sentiric_sip_core::{parser, SipTransport};
 use std::net::SocketAddr;
@@ -66,9 +66,9 @@ pub struct SipServer {
 impl SipServer {
     pub async fn new(
         config: Arc<AppConfig>,
-        clients: Arc<Mutex<InternalClients>>,
         state: Arc<ProxyState>,
         redis: RedisConn,
+        routing_logic: Arc<MyProxyService>,
     ) -> Result<Self> {
         let bind_addr = format!("{}:{}", config.sip_bind_ip, config.sip_port);
         let transport = SipTransport::new(&bind_addr).await?;
@@ -76,7 +76,7 @@ impl SipServer {
         Ok(Self {
             config: config.clone(),
             transport: Arc::new(transport),
-            engine: ProxyEngine::new(clients, config, state, redis),
+            engine: ProxyEngine::new(config, state, redis, routing_logic),
         })
     }
 
@@ -98,7 +98,6 @@ impl SipServer {
                         Ok((len, src_addr)) => {
                             if len < 4 { continue; }
                             
-                            // Keep-alive (CRLF) filtresi
                             if len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
                                 debug!("💤 Keep-Alive paketi (Yoksayıldı) -> {}", src_addr);
                                 continue;

@@ -1,23 +1,20 @@
 // sentiric-proxy-service/src/grpc/client.rs
 
 use crate::config::AppConfig;
-use anyhow::{Context, Result};
-// Gerekli İstemciler
-use sentiric_contracts::sentiric::sip::v1::proxy_service_client::ProxyServiceClient;
+use anyhow::Result; // Context silindi
 use sentiric_contracts::sentiric::sip::v1::registrar_service_client::RegistrarServiceClient;
 use sentiric_contracts::sentiric::sip::v1::b2bua_service_client::B2buaServiceClient;
 use sentiric_contracts::sentiric::dialplan::v1::dialplan_service_client::DialplanServiceClient;
 
 use tonic::transport::{Channel, ClientTlsConfig, Certificate, Identity};
 use std::time::Duration;
-use tracing::{info, warn}; // 'error' kullanılmadığı için çıkarıldı.
+use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct InternalClients {
     pub registrar: RegistrarServiceClient<Channel>,
     pub b2bua: B2buaServiceClient<Channel>,
     pub dialplan: DialplanServiceClient<Channel>,
-    pub proxy: ProxyServiceClient<Channel>, // Kendi kendine sormak için
 }
 
 impl InternalClients {
@@ -28,23 +25,12 @@ impl InternalClients {
         let b2bua_channel = create_secure_channel(&config.b2bua_grpc_url, "b2bua-service", config).await?;
         let dialplan_channel = create_secure_channel(&config.dialplan_grpc_url, "dialplan-service", config).await?;
 
-        // [LOOPBACK BAĞLANTISI]
-        // ProxyEngine (SIP UDP), yönlendirme kararını sormak için ProxyService (gRPC)'e bağlanır.
-        // Aynı process içinde oldukları için localhost kullanılır.
-        // TLS devre dışı bırakılarak bağlanılır (Performans için).
-        let loopback_url = format!("http://127.0.0.1:{}", config.grpc_listen_addr.port());
-        let proxy_channel = Channel::from_shared(loopback_url)?
-            .connect()
-            .await
-            .context("Proxy loopback bağlantısı kurulamadı")?;
-
-        info!("✅ Tüm gRPC istemcileri başarıyla oluşturuldu.");
+        info!("✅ Tüm dış gRPC istemcileri başarıyla oluşturuldu.");
 
         Ok(Self {
             registrar: RegistrarServiceClient::new(registrar_channel),
             b2bua: B2buaServiceClient::new(b2bua_channel),
             dialplan: DialplanServiceClient::new(dialplan_channel),
-            proxy: ProxyServiceClient::new(proxy_channel),
         })
     }
 }
