@@ -8,22 +8,19 @@ use crate::grpc::service::MyProxyService;
 use sentiric_sip_core::{
     HeaderName, Method, SipPacket,
     SipRouter,
-    TransactionEngine, TransactionAction, SipTransaction,
-    utils as sip_core_utils
+    TransactionEngine, TransactionAction, SipTransaction
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{error, instrument}; 
+use tracing::{error, instrument, info}; 
 use dashmap::DashMap;
-
-// [KRİTİK]: Trait scope'a dahil edildi, get_next_hop artık görünür.
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
 
 pub type TransactionStore = Arc<DashMap<String, SipTransaction>>;
 
 pub struct ProxyEngine {
     config: Arc<AppConfig>,
-    _state: Arc<ProxyState>, 
+    state: Arc<ProxyState>, 
     _router: RoutingHandler, 
     transactions: TransactionStore,
     routing_logic: Arc<MyProxyService>,
@@ -38,7 +35,7 @@ impl ProxyEngine {
     ) -> Self {
         Self { 
             config, 
-            _state: state, 
+            state, 
             _router: RoutingHandler::new(redis),
             transactions: Arc::new(DashMap::new()),
             routing_logic,
@@ -48,10 +45,10 @@ impl ProxyEngine {
     #[instrument(skip(self, packet))]
     pub async fn process_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         if SipRouter::detect_loop(packet, &self.config.proxy_advertised_host, self.config.sip_port) {
-            return Some((SipPacket::create_response_for(packet, 482, "Loop Detected".into()), Some(src_addr)));
+            return Some((SipPacket::create_response_for(packet, 482, "Döngü Tespit Edildi".into()), Some(src_addr)));
         }
         if SipRouter::decrement_max_forwards(packet).is_err() {
-            return Some((SipPacket::create_response_for(packet, 483, "Too Many Hops".into()), Some(src_addr)));
+            return Some((SipPacket::create_response_for(packet, 483, "Çok Fazla Atlama".into()), Some(src_addr)));
         }
         if packet.is_request() { SipRouter::fix_nat_via(packet, src_addr); }
 
@@ -93,25 +90,34 @@ impl ProxyEngine {
             }
         );
 
-        // get_next_hop artık ProxyService trait'i sayesinde çağrılabilir.
         match self.routing_logic.get_next_hop(request).await {
             Ok(res) => {
                 let inner_res = res.into_inner();
                 let next_hop_uri = inner_res.uri; 
 
-                if let Some(target_addr) = sip_core_utils::extract_socket_addr(&next_hop_uri) {
+                // [UYARI GİDERİLDİ]: state.resolve_addr kullanılıyor.
+                let target_addr = match self.state.resolve_addr(&next_hop_uri).await {
+                    Ok(addr) => Some(addr),
+                    Err(e) => {
+                        error!("❌ Hedef çözümlenemedi ({}): {}", next_hop_uri, e);
+                        None
+                    }
+                };
+
+                if let Some(target) = target_addr {
                     if packet.method == Method::Invite {
                         SipRouter::add_record_route(packet, &self.config.proxy_advertised_host, self.config.sip_port);
                     }
                     SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
-                    return Some((packet.clone(), Some(target_addr)));
+                    info!("🚀 Paket hedefe yönlendiriliyor ({}): {}", packet.method, target);
+                    return Some((packet.clone(), Some(target)));
                 } else {
                     return Some((SipPacket::create_response_for(packet, 404, "Not Found".into()), Some(src_addr)));
                 }
             },
             Err(e) => {
-                error!("🔥 Routing Logic Failed: {}", e);
-                return Some((SipPacket::create_response_for(packet, 503, "Service Unavailable".into()), Some(src_addr)));
+                error!("🔥 Yönlendirme mantığı hatası: {}", e);
+                return Some((SipPacket::create_response_for(packet, 503, "Hizmet Dışı".into()), Some(src_addr)));
             }
         }
     }

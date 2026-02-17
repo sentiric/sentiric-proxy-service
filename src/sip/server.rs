@@ -1,7 +1,6 @@
 // sentiric-proxy-service/src/sip/server.rs
 
 use crate::config::AppConfig;
-// [SİLİNDİ] use crate::grpc::client::InternalClients;
 use crate::sip::engine::ProxyEngine;
 use crate::sip::handlers::routing::RedisConn; 
 use crate::grpc::service::MyProxyService;
@@ -32,11 +31,22 @@ impl ProxyState {
         }
     }
 
-    pub async fn resolve_b2bua_addr(&self, hostname: &str) -> Result<SocketAddr> {
+    /// Genel DNS çözümleme metodu (İleride cache eklenebilir)
+    pub async fn resolve_addr(&self, hostname: &str) -> Result<SocketAddr> {
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Ok(addr);
         }
 
+        debug!("🔍 DNS Çözümleniyor: {}", hostname);
+        let addr = lookup_host(hostname)
+            .await?
+            .next()
+            .ok_or_else(|| anyhow!("DNS kaydı bulunamadı: {}", hostname))?;
+        
+        Ok(addr)
+    }
+
+    pub async fn resolve_b2bua_addr(&self, hostname: &str) -> Result<SocketAddr> {
         let mut cache = self.b2bua_cache.lock().await;
         let now = Instant::now();
 
@@ -46,12 +56,7 @@ impl ProxyState {
             }
         }
 
-        info!("DNS Çözümleniyor: {}", hostname);
-        let addr = lookup_host(hostname)
-            .await?
-            .next()
-            .ok_or_else(|| anyhow!("DNS kaydı yok: {}", hostname))?;
-        
+        let addr = self.resolve_addr(hostname).await?;
         cache.addr = Some((addr, now));
         Ok(addr)
     }
@@ -89,7 +94,7 @@ impl SipServer {
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => {
-                    info!("🛑 SIP Server kapatılıyor...");
+                    info!("🛑 SIP Sunucusu kapatılıyor...");
                     break;
                 }
 
@@ -99,7 +104,7 @@ impl SipServer {
                             if len < 4 { continue; }
                             
                             if len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
-                                debug!("💤 Keep-Alive paketi (Yoksayıldı) -> {}", src_addr);
+                                debug!("💤 Keep-Alive paketi yoksayıldı -> {}", src_addr);
                                 continue;
                             }
 
@@ -122,7 +127,7 @@ impl SipServer {
                             }
                         },
                         Err(e) => {
-                            error!("🔥 UDP Socket Hatası: {}", e);
+                            error!("🔥 UDP Soket Hatası: {}", e);
                         }
                     }
                 }
