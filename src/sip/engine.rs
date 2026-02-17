@@ -114,7 +114,10 @@ impl ProxyEngine {
 
                 if let Some(target) = target_addr {
                     if packet.method == Method::Invite {
-                        SipRouter::add_record_route(packet, &self.config.proxy_advertised_host, self.config.sip_port);
+                        // [KRİTİK DÜZELTME]: Record-Route'a kendi ismini (proxy-service) değil, 
+                        // dışarıdan erişilebilir tek kapı olan SBC'nin Public IP'sini yazmalı.
+                        // Aksi halde Baresip ACK paketini proxy-service:13074 adresine atmaya çalışır.
+                        SipRouter::add_record_route(packet, &self.config.public_ip, 5060);
                     }
                     SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
                     info!("🚀 Paket yönlendiriliyor ({}): {}", packet.method, target);
