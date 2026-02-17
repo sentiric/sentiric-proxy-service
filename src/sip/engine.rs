@@ -45,10 +45,12 @@ impl ProxyEngine {
 
     #[instrument(skip(self, packet))]
     pub async fn process_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // [KRİTİK DÜZELTME]: Döngü ve Max-Forwards kontrolü SADECE İSTEKLER içindir.
         if packet.is_request() {
-            // 1. Döngü Tespiti
-            if SipRouter::detect_loop(packet, &self.config.proxy_advertised_host, self.config.sip_port) {
+            // [KRİTİK DÜZELTME]: Diyalog içi (ACK, BYE, CANCEL) paketlerde döngü kontrolünü esnet.
+            let is_in_dialog = packet.is_in_dialog_request();
+            
+            // 1. Döngü Tespiti (Sadece yeni istekler - INVITE, REGISTER - için sıkı denetim)
+            if !is_in_dialog && SipRouter::detect_loop(packet, &self.config.proxy_advertised_host, self.config.sip_port) {
                 info!("🔄 Döngü tespit edildi, paket durduruldu.");
                 return Some((SipPacket::create_response_for(packet, 482, "Döngü Tespit Edildi".into()), Some(src_addr)));
             }
@@ -81,10 +83,19 @@ impl ProxyEngine {
                 }
             }
 
-            // İsteği işle
+            // [YENİ MANTIK]: Eğer Route başlığı bizi gösteriyorsa, onu temizle (Consume Route)
+            packet.headers.retain(|h| {
+                if h.name == HeaderName::Route {
+                    // Eğer Route başlığı bizi veya SBC'yi işaret ediyorsa, bu başlığı tüketiyoruz.
+                    !h.value.contains(&self.config.proxy_advertised_host) && 
+                    !h.value.contains(&self.config.public_ip)
+                } else {
+                    true
+                }
+            });
+
             self.handle_request(packet, src_addr).await
         } else {
-            // [KRİTİK]: YANITLARI (Responses) doğrudan işle, döngü kontrolü yapma!
             self.handle_response(packet).await
         }
     }
