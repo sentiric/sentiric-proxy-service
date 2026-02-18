@@ -41,7 +41,7 @@ impl App {
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        // [GÜNCELLENDİ]
+        // [GÜNCELLENDİ] JSON Loglama
         if config.log_format == "json" {
             subscriber.with(fmt::layer().json().flatten_event(true)).init();
         } else {
