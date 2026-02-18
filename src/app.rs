@@ -41,8 +41,9 @@ impl App {
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        if config.env == "production" {
-            subscriber.with(fmt::layer().json()).init();
+        // [GÜNCELLENDİ]
+        if config.log_format == "json" {
+            subscriber.with(fmt::layer().json().flatten_event(true)).init();
         } else {
             subscriber.with(fmt::layer().compact()).init();
         }
@@ -51,6 +52,7 @@ impl App {
             service_name = "sentiric-proxy-service",
             version = %config.service_version,
             profile = %config.env,
+            log_format = %config.log_format,
             "🚀 Servis başlatılıyor..."
         );
         
@@ -124,7 +126,6 @@ impl App {
         let sip_config = self.config.clone();
         let state = Arc::new(ProxyState::new()); 
         
-        // [GÜNCELLEME] clients_container parametresi SipServer::new'den kaldırıldı.
         let sip_server = SipServer::new(sip_config, state, redis_conn, routing_logic).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
@@ -162,7 +163,7 @@ impl App {
         // Sunucuların kapanması için kısa bir süre tanı
         tokio::time::sleep(Duration::from_millis(500)).await;
         
-        info!("Servis durduruldu.");
+        info!("Servis başarıyla durduruldu.");
         Ok(())
     }
 }

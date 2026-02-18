@@ -22,12 +22,12 @@ pub struct AppConfig {
     pub b2bua_sip_addr: String,
     pub registrar_sip_addr: String,
     
-    // [YENİ] Teknik Borç Çözümü: İç ağa zorlanacak kullanıcı adları
     pub internal_service_users: Vec<String>,
 
     pub redis_url: String,
     pub env: String,
     pub rust_log: String,
+    pub log_format: String, // [YENİ]
     pub service_version: String,
     pub cert_path: String,
     pub key_path: String,
@@ -36,7 +36,6 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
-        // ... (Mevcut port ve adres tanımları aynı kalıyor) ...
         let grpc_port = env::var("PROXY_SERVICE_GRPC_PORT").unwrap_or_else(|_| "13071".to_string());
         let http_port = env::var("PROXY_SERVICE_HTTP_PORT").unwrap_or_else(|_| "13070".to_string());
         let sip_port_str = env::var("PROXY_SERVICE_SIP_PORT").unwrap_or_else(|_| "13074".to_string());
@@ -45,7 +44,6 @@ impl AppConfig {
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
         let public_ip = env::var("PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
 
-        // [YENİ] Virgülle ayrılmış listeyi parse et (Örn: "b2bua,operator,ai-agent")
         let internal_users_raw = env::var("CORE_INTERNAL_SERVICE_USERS").unwrap_or_else(|_| "b2bua".to_string());
         let internal_service_users = internal_users_raw
             .split(',')
@@ -66,10 +64,11 @@ impl AppConfig {
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET").context("B2BUA_SERVICE_SIP_TARGET eksik")?,
             registrar_sip_addr: env::var("REGISTRAR_SERVICE_SIP_TARGET").unwrap_or_else(|_| "proxy-service:13074".to_string()),
             
-            internal_service_users, // [EKLENDİ]
+            internal_service_users,
 
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()), // [YENİ]
             service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.5.1".to_string()),
             cert_path: env::var("PROXY_SERVICE_CERT_PATH").context("CERT PATH eksik")?,
             key_path: env::var("PROXY_SERVICE_KEY_PATH").context("KEY PATH eksik")?,
