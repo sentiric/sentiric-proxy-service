@@ -13,7 +13,7 @@ use sentiric_sip_core::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{error, info, debug, instrument}; // [FIX]: debug eklendi
+use tracing::{error, info, debug, instrument, warn};
 use dashmap::DashMap;
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
 
@@ -45,30 +45,29 @@ impl ProxyEngine {
 
     #[instrument(skip(self, packet))]
     pub async fn process_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
+        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+
         if packet.is_request() {
-            // [KRİTİK DÜZELTME]: Diyalog içi (ACK, BYE, CANCEL) paketlerde döngü kontrolünü esnet.
             let is_in_dialog = packet.is_in_dialog_request();
             
-            // 1. Döngü Tespiti (Sadece yeni istekler - INVITE, REGISTER - için sıkı denetim)
+            // 1. Loop Detection
             if !is_in_dialog && SipRouter::detect_loop(packet, &self.config.proxy_advertised_host, self.config.sip_port) {
-                info!("🔄 Döngü tespit edildi, paket durduruldu.");
-                return Some((SipPacket::create_response_for(packet, 482, "Döngü Tespit Edildi".into()), Some(src_addr)));
+                warn!(event="SIP_LOOP_DETECTED", trace_id=%call_id, "🔄 Döngü tespit edildi, paket durduruldu.");
+                return Some((SipPacket::create_response_for(packet, 482, "Loop Detected".into()), Some(src_addr)));
             }
             
-            // 2. Max-Forwards Kontrolü
+            // 2. Max-Forwards
             if SipRouter::decrement_max_forwards(packet).is_err() {
-                info!("🛑 Maksimum atlama sınırına ulaşıldı.");
-                return Some((SipPacket::create_response_for(packet, 483, "Çok Fazla Atlama".into()), Some(src_addr)));
+                warn!(event="SIP_MAX_FORWARDS", trace_id=%call_id, "🛑 Maksimum atlama sınırına ulaşıldı.");
+                return Some((SipPacket::create_response_for(packet, 483, "Too Many Hops".into()), Some(src_addr)));
             }
 
             // 3. NAT Düzeltmesi
             SipRouter::fix_nat_via(packet, src_addr);
 
-            // 4. Transaction Yönetimi (Retransmission engelleme)
+            // 4. Transaction Logic (Retransmission handling)
             if packet.method != Method::Ack {
-                let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
                 let tx_key = format!("{}:{:?}", call_id, packet.method);
-                
                 let action = if let Some(tx) = self.transactions.get(&tx_key) {
                     TransactionEngine::check(&Some(tx.clone()), packet)
                 } else {
@@ -77,16 +76,18 @@ impl ProxyEngine {
                 };
 
                 match action {
-                    TransactionAction::Retransmit(cached_resp) => return Some((cached_resp, Some(src_addr))),
+                    TransactionAction::Retransmit(cached_resp) => {
+                        debug!(event="SIP_RETRANSMIT", trace_id=%call_id, "Tekrar eden paket, cache'den yanıtlanıyor.");
+                        return Some((cached_resp, Some(src_addr)));
+                    },
                     TransactionAction::Ignore => return None,
                     TransactionAction::ForwardToApp => {}
                 }
             }
 
-            // [YENİ MANTIK]: Eğer Route başlığı bizi gösteriyorsa, onu temizle (Consume Route)
+            // Route Cleanup (Proxy kendisini Route başlığından çıkarmalı)
             packet.headers.retain(|h| {
                 if h.name == HeaderName::Route {
-                    // Eğer Route başlığı bizi veya SBC'yi işaret ediyorsa, bu başlığı tüketiyoruz.
                     !h.value.contains(&self.config.proxy_advertised_host) && 
                     !h.value.contains(&self.config.public_ip)
                 } else {
@@ -104,10 +105,11 @@ impl ProxyEngine {
         let from_uri = packet.get_header_value(HeaderName::From).cloned().unwrap_or_default();
         let dest_uri = packet.uri.clone();
         let in_dialog = packet.is_in_dialog_request();
+        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
         let request = tonic::Request::new(
             sentiric_contracts::sentiric::sip::v1::GetNextHopRequest {
-                destination_uri: dest_uri,
+                destination_uri: dest_uri.clone(),
                 source_ip: src_addr.ip().to_string(),
                 method: packet.method.as_str().to_string(),
                 from_uri,
@@ -119,15 +121,26 @@ impl ProxyEngine {
             Ok(res) => {
                 let inner_res = res.into_inner();
                 let next_hop_uri = inner_res.uri; 
+                let gateway_id = inner_res.gateway_id;
 
-                // [UYUM]: SIP URI'den temiz host:port ayıklama
+                // [KARAR LOGU] - Observer için en kritik log
+                info!(
+                    event = "SIP_ROUTE_DECISION",
+                    trace_id = %call_id,
+                    sip.call_id = %call_id,
+                    sip.method = %packet.method.as_str(),
+                    route.target = %next_hop_uri,
+                    route.gateway = %gateway_id,
+                    "🗺️ Yönlendirme kararı verildi"
+                );
+
                 let target_addr = if let Some(extracted_socket) = sip_core_utils::extract_socket_addr(&next_hop_uri) {
                     Some(extracted_socket)
                 } else {
                     match self.state.resolve_addr(&next_hop_uri).await {
                         Ok(addr) => Some(addr),
                         Err(e) => {
-                            error!("❌ Hedef çözümlenemedi ({}): {}", next_hop_uri, e);
+                            error!(event="DNS_FAIL", trace_id=%call_id, target=%next_hop_uri, error=%e, "Hedef çözümlenemedi");
                             None
                         }
                     }
@@ -138,16 +151,14 @@ impl ProxyEngine {
                         SipRouter::add_record_route(packet, &self.config.public_ip, 5060);
                     }
                     SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
-                    info!("🚀 Paket yönlendiriliyor ({}): {}", packet.method, target);
                     return Some((packet.clone(), Some(target)));
                 } else {
-                    error!("🔥 Hedef erişilemez durumda: {}", next_hop_uri);
                     return Some((SipPacket::create_response_for(packet, 404, "Not Found".into()), Some(src_addr)));
                 }
             },
             Err(e) => {
-                error!("🔥 Yönlendirme mantığı hatası: {}", e);
-                return Some((SipPacket::create_response_for(packet, 503, "Hizmet Dışı".into()), Some(src_addr)));
+                error!(event="ROUTING_LOGIC_ERROR", trace_id=%call_id, error=%e, "Yönlendirme mantığı hatası");
+                return Some((SipPacket::create_response_for(packet, 503, "Service Unavailable".into()), Some(src_addr)));
             }
         }
     }
@@ -155,9 +166,17 @@ impl ProxyEngine {
     async fn handle_response(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {
         if SipRouter::strip_top_via(packet).is_none() { return None; }
         
+        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = SipRouter::resolve_response_target(&next_via.value, DEFAULT_SIP_PORT) {
-                debug!("🔙 Yanıt geri gönderiliyor: {}", target);
+                // RESPONSE ROUTE LOG
+                debug!(
+                    event = "SIP_RESPONSE_ROUTED",
+                    trace_id = %call_id,
+                    target = %target,
+                    "🔙 Yanıt geri gönderiliyor"
+                );
                 return Some((packet.clone(), Some(target)));
             }
         }

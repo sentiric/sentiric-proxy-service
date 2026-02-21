@@ -1,5 +1,3 @@
-// sentiric-proxy-service/src/config.rs
-
 use anyhow::{Context, Result};
 use std::env;
 use std::net::SocketAddr;
@@ -13,22 +11,22 @@ pub struct AppConfig {
     pub proxy_advertised_host: String,
     pub public_ip: String,
     
-    // Bağımlı Servisler (gRPC)
+    // Bağımlı Servisler
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
     pub dialplan_grpc_url: String,
     
-    // SIP Hedefleri
     pub b2bua_sip_addr: String,
     pub registrar_sip_addr: String,
-    
     pub internal_service_users: Vec<String>,
 
     pub redis_url: String,
     pub env: String,
     pub rust_log: String,
-    pub log_format: String, // [YENİ]
+    pub log_format: String,
     pub service_version: String,
+    pub node_hostname: String, // YENİ
+
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
@@ -40,6 +38,7 @@ impl AppConfig {
         let http_port = env::var("PROXY_SERVICE_HTTP_PORT").unwrap_or_else(|_| "13070".to_string());
         let sip_port_str = env::var("PROXY_SERVICE_SIP_PORT").unwrap_or_else(|_| "13074".to_string());
         let sip_port = sip_port_str.parse::<u16>().context("Geçersiz SIP portu")?;
+        
         let grpc_addr: SocketAddr = format!("[::]:{}", grpc_port).parse()?;
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
         let public_ip = env::var("PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -63,13 +62,14 @@ impl AppConfig {
             redis_url: env::var("REDIS_URL").context("REDIS_URL eksik")?,
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET").context("B2BUA_SERVICE_SIP_TARGET eksik")?,
             registrar_sip_addr: env::var("REGISTRAR_SERVICE_SIP_TARGET").unwrap_or_else(|_| "proxy-service:13074".to_string()),
-            
             internal_service_users,
 
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-            log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()), // [YENİ]
+            log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "json".to_string()),
             service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.5.1".to_string()),
+            node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()), // YENİ
+
             cert_path: env::var("PROXY_SERVICE_CERT_PATH").context("CERT PATH eksik")?,
             key_path: env::var("PROXY_SERVICE_KEY_PATH").context("KEY PATH eksik")?,
             ca_path: env::var("GRPC_TLS_CA_PATH").context("CA PATH eksik")?,

@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-proxy-service"
-version = "1.5.0" # Mimari değişikliği yansıtan minor versiyon artışı
+version = "1.5.1"
 edition = "2021"
 
 [dependencies]
@@ -12,7 +12,11 @@ hyper = { version = "0.14", features = ["full"] }
 
 # Observability
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.3" # EKLENDİ: Hostname tespiti için
 
 # Config & Data
 dotenvy = "0.15"
@@ -20,11 +24,10 @@ anyhow = "1.0"
 thiserror = "1.0"
 config = "0.14"
 uuid = { version = "1.8", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 redis = { version = "0.26", features = ["tokio-rustls-comp"] }
 dashmap = "5.5"
 
-# --- THE IRON CORE (UPDATED) ---
+# --- THE IRON CORE ---
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.5.5" }
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.17.0" }
