@@ -1,4 +1,4 @@
-// sentiric-proxy-service/src/sip/engine.rs
+// src/sip/engine.rs
 
 use crate::config::AppConfig;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
@@ -52,13 +52,13 @@ impl ProxyEngine {
             
             // 1. Loop Detection
             if !is_in_dialog && SipRouter::detect_loop(packet, &self.config.proxy_advertised_host, self.config.sip_port) {
-                warn!(event="SIP_LOOP_DETECTED", trace_id=%call_id, "🔄 Döngü tespit edildi, paket durduruldu.");
+                warn!(event="SIP_LOOP_DETECTED", sip.call_id=%call_id, "🔄 Döngü tespit edildi, paket durduruldu.");
                 return Some((SipPacket::create_response_for(packet, 482, "Loop Detected".into()), Some(src_addr)));
             }
             
             // 2. Max-Forwards
             if SipRouter::decrement_max_forwards(packet).is_err() {
-                warn!(event="SIP_MAX_FORWARDS", trace_id=%call_id, "🛑 Maksimum atlama sınırına ulaşıldı.");
+                warn!(event="SIP_MAX_FORWARDS", sip.call_id=%call_id, "🛑 Maksimum atlama sınırına ulaşıldı.");
                 return Some((SipPacket::create_response_for(packet, 483, "Too Many Hops".into()), Some(src_addr)));
             }
 
@@ -77,7 +77,7 @@ impl ProxyEngine {
 
                 match action {
                     TransactionAction::Retransmit(cached_resp) => {
-                        debug!(event="SIP_RETRANSMIT", trace_id=%call_id, "Tekrar eden paket, cache'den yanıtlanıyor.");
+                        debug!(event="SIP_RETRANSMIT", sip.call_id=%call_id, "Tekrar eden paket, cache'den yanıtlanıyor.");
                         return Some((cached_resp, Some(src_addr)));
                     },
                     TransactionAction::Ignore => return None,
@@ -85,7 +85,7 @@ impl ProxyEngine {
                 }
             }
 
-            // Route Cleanup (Proxy kendisini Route başlığından çıkarmalı)
+            // Route Cleanup
             packet.headers.retain(|h| {
                 if h.name == HeaderName::Route {
                     !h.value.contains(&self.config.proxy_advertised_host) && 
@@ -123,10 +123,10 @@ impl ProxyEngine {
                 let next_hop_uri = inner_res.uri; 
                 let gateway_id = inner_res.gateway_id;
 
-                // [KARAR LOGU] - Observer için en kritik log
+                // [SUTS v4.0]: KARAR LOGU
+                // Hangi gateway'e neden gidildiği burada kayıt altına alınır.
                 info!(
                     event = "SIP_ROUTE_DECISION",
-                    trace_id = %call_id,
                     sip.call_id = %call_id,
                     sip.method = %packet.method.as_str(),
                     route.target = %next_hop_uri,
@@ -140,7 +140,7 @@ impl ProxyEngine {
                     match self.state.resolve_addr(&next_hop_uri).await {
                         Ok(addr) => Some(addr),
                         Err(e) => {
-                            error!(event="DNS_FAIL", trace_id=%call_id, target=%next_hop_uri, error=%e, "Hedef çözümlenemedi");
+                            error!(event="DNS_FAIL", sip.call_id=%call_id, target=%next_hop_uri, error=%e, "Hedef çözümlenemedi");
                             None
                         }
                     }
@@ -157,7 +157,7 @@ impl ProxyEngine {
                 }
             },
             Err(e) => {
-                error!(event="ROUTING_LOGIC_ERROR", trace_id=%call_id, error=%e, "Yönlendirme mantığı hatası");
+                error!(event="ROUTING_LOGIC_ERROR", sip.call_id=%call_id, error=%e, "Yönlendirme mantığı hatası");
                 return Some((SipPacket::create_response_for(packet, 503, "Service Unavailable".into()), Some(src_addr)));
             }
         }
@@ -170,10 +170,9 @@ impl ProxyEngine {
 
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = SipRouter::resolve_response_target(&next_via.value, DEFAULT_SIP_PORT) {
-                // RESPONSE ROUTE LOG
                 debug!(
                     event = "SIP_RESPONSE_ROUTED",
-                    trace_id = %call_id,
+                    sip.call_id = %call_id,
                     target = %target,
                     "🔙 Yanıt geri gönderiliyor"
                 );

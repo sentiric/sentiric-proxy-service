@@ -1,3 +1,4 @@
+// src/telemetry.rs
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -10,16 +11,26 @@ use tracing_subscriber::registry::LookupSpan;
 /// SUTS v4.0 Log Record (Proxy Edition)
 #[derive(Serialize)]
 struct SutsLogRecord<'a> {
+    // 1. Governance
     schema_v: &'static str,
     ts: String,
     severity: String,
     tenant_id: String,
+
+    // 2. Resource
     resource: ResourceContext,
-    trace_id: Option<String>, // Correlation ID
+
+    // 3. Tracing
+    trace_id: Option<String>,
     span_id: Option<String>,
+
+    // 4. Payload
     event: String,
     message: String,
+
+    // 5. Attributes
     attributes: HashMap<String, Value>,
+
     #[serde(skip)]
     _marker: std::marker::PhantomData<&'a ()>,
 }
@@ -67,11 +78,13 @@ where
         let meta = event.metadata();
         let ts = Utc::now().to_rfc3339();
         
+        // Severity Mapping (SUTS Standard)
         let severity = match *meta.level() {
             tracing::Level::ERROR => "ERROR",
             tracing::Level::WARN => "WARN",
             tracing::Level::INFO => "INFO",
-            tracing::Level::DEBUG | tracing::Level::TRACE => "DEBUG",
+            tracing::Level::DEBUG => "DEBUG",
+            tracing::Level::TRACE => "DEBUG",
         }.to_string();
 
         let mut visitor = JsonVisitor::default();
@@ -85,7 +98,8 @@ where
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(String::new);
 
-        // Trace ID Promotion Logic
+        // --- INTELLIGENCE LOGIC: TRACE ID PROMOTION ---
+        // Proxy için sip.call_id en önemli trace anahtarıdır.
         let trace_id = if let Some(tid) = visitor.fields.get("trace_id").and_then(|v| v.as_str()) {
             Some(tid.to_string())
         } else if let Some(cid) = visitor.fields.get("sip.call_id").and_then(|v| v.as_str()) {
@@ -136,5 +150,11 @@ impl tracing::field::Visit for JsonVisitor {
     }
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
         self.fields.insert(field.name().to_string(), json!(value));
+    }
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        self.fields.insert(field.name().to_string(), json!(value));
+    }
+    fn record_error(&mut self, field: &tracing::field::Field, value: &(dyn std::error::Error + 'static)) {
+        self.fields.insert(field.name().to_string(), Value::String(value.to_string()));
     }
 }

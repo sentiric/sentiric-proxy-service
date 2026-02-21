@@ -1,4 +1,4 @@
-// sentiric-proxy-service/src/grpc/service.rs
+// src/grpc/service.rs
 
 use sentiric_contracts::sentiric::sip::v1::{
     proxy_service_server::ProxyService,
@@ -11,7 +11,7 @@ use sentiric_contracts::sentiric::dialplan::v1::{
 use sentiric_sip_core::utils as sip_utils;
 
 use tonic::{Request, Response, Status};
-use tracing::{error, instrument, debug};
+use tracing::{error, instrument, debug, info}; // Info eklendi
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::{Instant, Duration};
@@ -55,6 +55,7 @@ impl ProxyService for MyProxyService {
 
         // 1. CORE-ROUTING (B2BUA/AI) Hızlı Yol
         if self.config.internal_service_users.contains(&destination_user) {
+            info!(event="ROUTE_INTERNAL_USER", user=%destination_user, "Dahili servis kullanıcısı tespit edildi.");
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.b2bua_sip_addr.clone(),
                 gateway_id: format!("core-internal-{}", destination_user),
@@ -83,7 +84,12 @@ impl ProxyService for MyProxyService {
         if let Some(cached) = self.cache.get(&cache_key) {
             let (res, ts) = cached.value();
             if ts.elapsed() < Duration::from_secs(300) { // 5 dakika cache
-                debug!("⚡ [CACHE-HIT] Dialplan retrieved from cache for {}", cache_key);
+                // [SUTS v4.0]: CACHE HIT
+                debug!(
+                    event = "DIALPLAN_CACHE_HIT",
+                    cache.key = %cache_key,
+                    "⚡ Dialplan önbellekten getirildi"
+                );
                 return self.resolve_action(res, &req.destination_uri).await;
             }
         }
@@ -102,12 +108,19 @@ impl ProxyService for MyProxyService {
         match dialplan_client.resolve_dialplan(dialplan_req).await {
             Ok(res) => {
                 let resolution = res.into_inner();
+                // [SUTS v4.0]: CACHE MISS
+                info!(
+                    event = "DIALPLAN_CACHE_MISS",
+                    cache.key = %cache_key,
+                    "Dialplan servisinden yeni rota öğrenildi"
+                );
+                
                 // Cache'e yaz
                 self.cache.insert(cache_key, (resolution.clone(), Instant::now()));
                 self.resolve_action(&resolution, &req.destination_uri).await
             },
             Err(e) => {
-                error!("❌ Dialplan Error: {}. Fallback to B2BUA.", e);
+                error!(event="DIALPLAN_ERROR", error=%e, "Dialplan hatası, B2BUA'ya fallback yapılıyor.");
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "failsafe-b2bua".to_string(),
@@ -118,14 +131,13 @@ impl ProxyService for MyProxyService {
 }
 
 impl MyProxyService {
-    // Aksiyon çözme mantığını gRPC metodundan ayırdık (Refactoring for SOC)
     async fn resolve_action(&self, resolution: &ResolveDialplanResponse, dest_uri: &str) -> Result<Response<GetNextHopResponse>, Status> {
         let action = resolution.action.as_ref().ok_or_else(|| Status::internal("Action missing"))?;
         let action_type = ActionType::try_from(action.r#type).unwrap_or(ActionType::Unspecified);
 
         match action_type {
             ActionType::BridgeCall => {
-                // Registrar sorgusu (Bu da ileride cache'lenebilir)
+                // Registrar sorgusu
                 let clients_guard = self.clients.lock().await;
                 let mut registrar_client = clients_guard.as_ref().unwrap().registrar.clone();
                 drop(clients_guard);

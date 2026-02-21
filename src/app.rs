@@ -1,9 +1,10 @@
+// src/app.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MyProxyService;
 use crate::grpc::client::InternalClients;
 use crate::tls::load_server_tls_config;
 use crate::sip::server::{SipServer, ProxyState};
-use crate::telemetry::SutsFormatter; // YENİ
+use crate::telemetry::SutsFormatter; 
 use anyhow::{Context, Result};
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyServiceServer;
 use std::convert::Infallible;
@@ -67,6 +68,8 @@ impl App {
 
     pub async fn run(self) -> Result<()> {
         
+        // Shutdown kanalları
+        // unused variable warnings için _ ile başlayan isimler kullanıldı
         let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -94,12 +97,15 @@ impl App {
         let grpc_logic_ref = routing_logic.clone();
         let grpc_server_handle = tokio::spawn(async move {
             let tls_config = load_server_tls_config(&grpc_config).await.expect("TLS hatası");
+            
+            info!(event="GRPC_SERVER_START", addr=%grpc_config.grpc_listen_addr, "gRPC Sunucusu başlatılıyor...");
+            
             GrpcServer::builder()
                 .tls_config(tls_config).expect("TLS hatası")
                 .add_service(ProxyServiceServer::from_arc(grpc_logic_ref))
                 .serve_with_shutdown(grpc_config.grpc_listen_addr, async {
                     let _ = grpc_stop_rx.recv().await;
-                    info!(event="GRPC_SHUTDOWN", "gRPC sunucusu kapanıyor.");
+                    info!(event="GRPC_SHUTDOWN_SIGNAL", "gRPC sunucusu kapanıyor.");
                 })
                 .await
                 .context("gRPC sunucusu çöktü")
@@ -143,7 +149,7 @@ impl App {
             let server = HttpServer::bind(&addr).serve(make_svc).with_graceful_shutdown(async {
                 http_shutdown_rx.await.ok();
             });
-            info!(event="HTTP_START", address=%addr, "HTTP sunucusu aktif.");
+            info!(event="HTTP_SERVER_START", address=%addr, "HTTP sunucusu aktif.");
             if let Err(e) = server.await { error!(error=%e, "HTTP sunucusu hatası"); }
         });
 

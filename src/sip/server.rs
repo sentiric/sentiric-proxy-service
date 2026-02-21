@@ -1,4 +1,4 @@
-// sentiric-proxy-service/src/sip/server.rs
+// src/sip/server.rs
 
 use crate::config::AppConfig;
 use crate::sip::engine::ProxyEngine;
@@ -21,8 +21,6 @@ struct DnsCache {
 }
 
 pub struct ProxyState {
-    // B2BUA adresi çok sık değişmez, bunu cache'lemek performansı artırır.
-    // Şimdilik Engine doğrudan kullanmasa da mimari bütünlük için tutuyoruz.
     #[allow(dead_code)] 
     b2bua_cache: Mutex<DnsCache>,
 }
@@ -34,7 +32,6 @@ impl ProxyState {
         }
     }
 
-    /// Genel DNS çözümleme metodu
     pub async fn resolve_addr(&self, hostname: &str) -> Result<SocketAddr> {
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Ok(addr);
@@ -49,16 +46,12 @@ impl ProxyState {
         Ok(addr)
     }
 
-    /// B2BUA için özel L1 Cache (1 dakika TTL)
-    /// Bu metod şu an Engine tarafından çağrılmasa bile 'pub' olduğu için ve
-    /// gelecekteki optimizasyonlar için korunmalıdır.
     #[allow(dead_code)]
     pub async fn resolve_b2bua_addr(&self, hostname: &str) -> Result<SocketAddr> {
         let mut cache = self.b2bua_cache.lock().await;
         let now = Instant::now();
 
         if let Some((addr, timestamp)) = cache.addr {
-            // 60 saniye TTL
             if now.duration_since(timestamp) < Duration::from_secs(60) {
                 return Ok(addr);
             }
@@ -125,13 +118,13 @@ impl SipServer {
                             match parser::parse(data) {
                                 Ok(mut packet) => {
                                     // 1. INGRESS LOG (SUTS v4.0)
+                                    // Observer için en önemli log. Trace başlangıcı.
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
                                     let method = packet.method.as_str();
                                     
                                     debug!(
                                         event = "SIP_PACKET_RECEIVED",
-                                        trace_id = %call_id,
-                                        sip.call_id = %call_id,
+                                        sip.call_id = %call_id, // -> Trace ID olacak
                                         sip.method = %method,
                                         net.src.ip = %src_addr.ip(),
                                         net.src.port = src_addr.port(),
@@ -145,7 +138,6 @@ impl SipServer {
                                             let resp_method = resp_packet.method.as_str();
                                             info!(
                                                 event = "SIP_PACKET_SENT",
-                                                trace_id = %call_id,
                                                 sip.call_id = %call_id,
                                                 sip.method = %resp_method,
                                                 net.dst.ip = %dest.ip(),
@@ -157,7 +149,7 @@ impl SipServer {
                                             if let Err(e) = self.transport.send(&resp_bytes, dest).await {
                                                 error!(
                                                     event = "SIP_SEND_ERROR",
-                                                    trace_id = %call_id,
+                                                    sip.call_id = %call_id,
                                                     net.dst.ip = %dest.ip(),
                                                     error = %e,
                                                     "🔥 SIP gönderim hatası"
