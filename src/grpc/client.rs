@@ -1,7 +1,7 @@
 // sentiric-proxy-service/src/grpc/client.rs
 
 use crate::config::AppConfig;
-use anyhow::Result; // Context silindi
+use anyhow::Result; 
 use sentiric_contracts::sentiric::sip::v1::registrar_service_client::RegistrarServiceClient;
 use sentiric_contracts::sentiric::sip::v1::b2bua_service_client::B2buaServiceClient;
 use sentiric_contracts::sentiric::dialplan::v1::dialplan_service_client::DialplanServiceClient;
@@ -19,7 +19,7 @@ pub struct InternalClients {
 
 impl InternalClients {
     pub async fn connect(config: &AppConfig) -> Result<Self> {
-        info!("🔌 İç servislere bağlanılıyor (mTLS)...");
+        info!("🔌 İç servislere bağlanılıyor (mTLS + KeepAlive)...");
 
         let registrar_channel = create_secure_channel(&config.registrar_grpc_url, "registrar-service", config).await?;
         let b2bua_channel = create_secure_channel(&config.b2bua_grpc_url, "b2bua-service", config).await?;
@@ -58,11 +58,17 @@ async fn create_secure_channel(url: &str, server_name: &str, config: &AppConfig)
         .ca_certificate(ca_certificate)
         .identity(identity);
 
+    // [KRİTİK DÜZELTME]: HTTP/2 Keep-Alive eklendi.
     let channel = Channel::from_shared(target_url)?
         .connect_timeout(Duration::from_secs(5))
+        .keep_alive_while_idle(true)
+        .http2_keep_alive_interval(Duration::from_secs(15))
+        .keep_alive_timeout(Duration::from_secs(5))
         .tls_config(tls_config)?
         .connect()
         .await?;
+
+    info!("gRPC bağlantısı başarılı: {}", server_name);
 
     Ok(channel)
 }

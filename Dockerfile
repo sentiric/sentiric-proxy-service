@@ -1,5 +1,5 @@
 # --- STAGE 1: Builder ---
-FROM rust:1.88-slim-bookworm AS builder
+FROM rust:1.93-slim-bookworm AS builder
 
 RUN apt-get update && \
     apt-get install -y git pkg-config libssl-dev protobuf-compiler curl && \
