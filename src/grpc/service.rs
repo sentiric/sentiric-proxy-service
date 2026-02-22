@@ -11,7 +11,7 @@ use sentiric_contracts::sentiric::dialplan::v1::{
 use sentiric_sip_core::utils as sip_utils;
 
 use tonic::{Request, Response, Status};
-use tracing::{error, instrument, debug, info, Span}; // Span eklendi
+use tracing::{error, instrument, debug, info, Span}; 
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::{Instant, Duration};
@@ -36,17 +36,14 @@ impl MyProxyService {
 #[tonic::async_trait]
 impl ProxyService for MyProxyService {
     
-    // [FIX]: `trace_id` alanını baştan tanımlıyoruz ki span içine düşsün.
     #[instrument(skip_all, fields(sip.call_id, trace_id, to_uri = %request.get_ref().destination_uri, method = %request.get_ref().method))]
     async fn get_next_hop(&self, request: Request<GetNextHopRequest>) -> Result<Response<GetNextHopResponse>, Status> {
         
-        // 1. Trace ID'yi En Başta Yakala
         let trace_id = request.metadata().get("x-trace-id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("unknown")
             .to_string();
         
-        // 2. Span'i Güncelle (Artık bu fonksiyondaki TÜM loglar bu ID'yi taşıyacak)
         Span::current().record("trace_id", &trace_id);
         Span::current().record("sip.call_id", &trace_id);
 
@@ -54,7 +51,6 @@ impl ProxyService for MyProxyService {
         let destination_user = sip_utils::extract_username_from_uri(&req.destination_uri).to_lowercase();
         let caller_id = sip_utils::extract_username_from_uri(&req.from_uri);
 
-        // Artık bu log 'unknown' atmayacak
         if self.config.internal_service_users.contains(&destination_user) {
             info!(
                 event="ROUTE_INTERNAL_USER", 
@@ -67,9 +63,9 @@ impl ProxyService for MyProxyService {
             }));
         }
         
-        if req.is_in_dialog {
+        // [HATA 1 ÇÖZÜMÜ]: CANCEL paketleri In-Dialog routing'e girip sonsuz döngü yaratmasın!
+        if req.is_in_dialog && req.method != "CANCEL" {
             let target_uri = req.destination_uri.replace('<', "").replace('>', "");
-            // Bu log da artık trace_id taşıyacak
             debug!(event="ROUTE_IN_DIALOG", "Diyalog içi yönlendirme yapılıyor.");
             return Ok(Response::new(GetNextHopResponse { uri: target_uri, gateway_id: "direct-route-in-dialog".to_string() }));
         }
@@ -82,7 +78,6 @@ impl ProxyService for MyProxyService {
         if let Some(cached) = self.cache.get(&cache_key) {
             let (res, ts) = cached.value();
             if ts.elapsed() < Duration::from_secs(300) { 
-                // Bu log daha önce 'unknown' atıyordu, şimdi düzelecek.
                 info!(
                     event = "DIALPLAN_CACHE_HIT", 
                     cache.key = %cache_key, 
@@ -102,7 +97,6 @@ impl ProxyService for MyProxyService {
             destination_number: destination_user.clone(),
         });
         
-        // Metadata Propagation
         if trace_id != "unknown" {
              let _ = dialplan_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
         }
@@ -110,7 +104,6 @@ impl ProxyService for MyProxyService {
         match dialplan_client.resolve_dialplan(dialplan_req).await {
             Ok(res) => {
                 let resolution = res.into_inner();
-                // Bu log da düzelecek
                 info!(
                     event = "DIALPLAN_CACHE_MISS", 
                     cache.key = %cache_key, 
@@ -127,7 +120,6 @@ impl ProxyService for MyProxyService {
     }
 }
 
-// ... resolve_action metodu aynı kalabilir ...
 impl MyProxyService {
     async fn resolve_action(&self, resolution: &ResolveDialplanResponse, dest_uri: &str, trace_id: &str) -> Result<Response<GetNextHopResponse>, Status> {
         let action = resolution.action.as_ref().ok_or_else(|| Status::internal("Action missing"))?;
