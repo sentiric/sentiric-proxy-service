@@ -1,4 +1,5 @@
 // sentiric-proxy-service/src/sip/engine.rs
+
 use crate::config::AppConfig;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::handlers::routing::{RoutingHandler, RedisConn};
@@ -60,7 +61,8 @@ impl ProxyEngine {
                 return Some((SipPacket::create_response_for(packet, 483, "Too Many Hops".into()), Some(src_addr)));
             }
 
-            SipRouter::fix_nat_via(packet, src_addr);
+            // [DÜZELTME]: SipRouter::fix_nat_via(packet, src_addr) KALDIRILDI!
+            // Proxy iç ağda olduğu için SBC'den gelen paketin Via'sına iç IP damgalamamalıdır.
 
             if packet.method != Method::Ack {
                 let tx_key = format!("{}:{:?}", call_id, packet.method);
@@ -146,7 +148,7 @@ impl ProxyEngine {
                 };
 
                 if let Some(target) = target_addr {
-                    // [HATA 1 ÇÖZÜMÜ B]: İsteği asıl hedefine iletmeden önce kaynak IP'yi (SBC) Redis'e kaydet.
+                    // Kaynak IP'yi (SBC) Redis'e kaydet ki dönüşte doğru yere simetrik gitsin
                     self._router.register_call_route(&call_id, src_addr, target).await;
 
                     if packet.method == Method::Invite {
@@ -170,8 +172,7 @@ impl ProxyEngine {
         
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
-        // [HATA 1 ÇÖZÜMÜ C]: Yanıtları Via'ya göre körü körüne yönlendirme.
-        // Eğer bu çağrı için Redis'te kayıtlı bir kaynak IP (SBC) varsa ORAYA SİMETRİK GÖNDER!
+        // Yanıtları güvenli şekilde SBC'ye geri gönder
         if let Some(sbc_addr) = self._router.get_client_source(&call_id).await {
             debug!(
                 event = "SIP_RESPONSE_ROUTED_SYMMETRIC",
@@ -182,7 +183,7 @@ impl ProxyEngine {
             return Some((packet.clone(), Some(sbc_addr)));
         }
 
-        // Fallback: Kayıt bulunamazsa normal Via yönlendirmesi
+        // Fallback
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = SipRouter::resolve_response_target(&next_via.value, DEFAULT_SIP_PORT) {
                 debug!(
