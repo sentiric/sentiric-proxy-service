@@ -11,7 +11,7 @@ use sentiric_contracts::sentiric::dialplan::v1::{
 use sentiric_sip_core::utils as sip_utils;
 
 use tonic::{Request, Response, Status};
-use tracing::{error, instrument, debug, info, warn, Span}; // Span eklendi
+use tracing::{error, instrument, debug, info, Span}; // Span eklendi
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::{Instant, Duration};

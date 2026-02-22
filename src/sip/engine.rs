@@ -1,4 +1,4 @@
-// src/sip/engine.rs
+// sentiric-proxy-service/src/sip/engine.rs
 
 use crate::config::AppConfig;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tracing::{error, info, debug, instrument, warn};
 use dashmap::DashMap;
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
+use std::str::FromStr; // [FIX]: EKLENDİ
 
 pub type TransactionStore = Arc<DashMap<String, SipTransaction>>;
 
@@ -107,7 +108,7 @@ impl ProxyEngine {
         let in_dialog = packet.is_in_dialog_request();
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
-        let request = tonic::Request::new(
+        let mut request = tonic::Request::new(
             sentiric_contracts::sentiric::sip::v1::GetNextHopRequest {
                 destination_uri: dest_uri.clone(),
                 source_ip: src_addr.ip().to_string(),
@@ -117,14 +118,19 @@ impl ProxyEngine {
             }
         );
 
+        if !call_id.is_empty() {
+             // [FIX]: FromStr import edildiği için artık çalışır.
+             if let Ok(meta_val) = tonic::metadata::MetadataValue::from_str(&call_id) {
+                 request.metadata_mut().insert("x-trace-id", meta_val);
+             }
+        }
+
         match self.routing_logic.get_next_hop(request).await {
             Ok(res) => {
                 let inner_res = res.into_inner();
                 let next_hop_uri = inner_res.uri; 
                 let gateway_id = inner_res.gateway_id;
 
-                // [SUTS v4.0]: KARAR LOGU
-                // Hangi gateway'e neden gidildiği burada kayıt altına alınır.
                 info!(
                     event = "SIP_ROUTE_DECISION",
                     sip.call_id = %call_id,
