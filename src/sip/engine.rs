@@ -1,5 +1,4 @@
 // sentiric-proxy-service/src/sip/engine.rs
-
 use crate::config::AppConfig;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::handlers::routing::{RoutingHandler, RedisConn};
@@ -16,7 +15,7 @@ use std::sync::Arc;
 use tracing::{error, info, debug, instrument, warn};
 use dashmap::DashMap;
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
-use std::str::FromStr; // [FIX]: EKLENDİ
+use std::str::FromStr;
 
 pub type TransactionStore = Arc<DashMap<String, SipTransaction>>;
 
@@ -51,22 +50,18 @@ impl ProxyEngine {
         if packet.is_request() {
             let is_in_dialog = packet.is_in_dialog_request();
             
-            // 1. Loop Detection
             if !is_in_dialog && SipRouter::detect_loop(packet, &self.config.proxy_advertised_host, self.config.sip_port) {
                 warn!(event="SIP_LOOP_DETECTED", sip.call_id=%call_id, "🔄 Döngü tespit edildi, paket durduruldu.");
                 return Some((SipPacket::create_response_for(packet, 482, "Loop Detected".into()), Some(src_addr)));
             }
             
-            // 2. Max-Forwards
             if SipRouter::decrement_max_forwards(packet).is_err() {
                 warn!(event="SIP_MAX_FORWARDS", sip.call_id=%call_id, "🛑 Maksimum atlama sınırına ulaşıldı.");
                 return Some((SipPacket::create_response_for(packet, 483, "Too Many Hops".into()), Some(src_addr)));
             }
 
-            // 3. NAT Düzeltmesi
             SipRouter::fix_nat_via(packet, src_addr);
 
-            // 4. Transaction Logic (Retransmission handling)
             if packet.method != Method::Ack {
                 let tx_key = format!("{}:{:?}", call_id, packet.method);
                 let action = if let Some(tx) = self.transactions.get(&tx_key) {
@@ -86,7 +81,6 @@ impl ProxyEngine {
                 }
             }
 
-            // Route Cleanup
             packet.headers.retain(|h| {
                 if h.name == HeaderName::Route {
                     !h.value.contains(&self.config.proxy_advertised_host) && 
@@ -119,7 +113,6 @@ impl ProxyEngine {
         );
 
         if !call_id.is_empty() {
-             // [FIX]: FromStr import edildiği için artık çalışır.
              if let Ok(meta_val) = tonic::metadata::MetadataValue::from_str(&call_id) {
                  request.metadata_mut().insert("x-trace-id", meta_val);
              }
@@ -153,6 +146,9 @@ impl ProxyEngine {
                 };
 
                 if let Some(target) = target_addr {
+                    // [HATA 1 ÇÖZÜMÜ B]: İsteği asıl hedefine iletmeden önce kaynak IP'yi (SBC) Redis'e kaydet.
+                    self._router.register_call_route(&call_id, src_addr, target).await;
+
                     if packet.method == Method::Invite {
                         SipRouter::add_record_route(packet, &self.config.public_ip, 5060);
                     }
@@ -174,13 +170,26 @@ impl ProxyEngine {
         
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
+        // [HATA 1 ÇÖZÜMÜ C]: Yanıtları Via'ya göre körü körüne yönlendirme.
+        // Eğer bu çağrı için Redis'te kayıtlı bir kaynak IP (SBC) varsa ORAYA SİMETRİK GÖNDER!
+        if let Some(sbc_addr) = self._router.get_client_source(&call_id).await {
+            debug!(
+                event = "SIP_RESPONSE_ROUTED_SYMMETRIC",
+                sip.call_id = %call_id,
+                target = %sbc_addr,
+                "🔙 Yanıt Redis rotası üzerinden güvenli bir şekilde SBC'ye gönderiliyor"
+            );
+            return Some((packet.clone(), Some(sbc_addr)));
+        }
+
+        // Fallback: Kayıt bulunamazsa normal Via yönlendirmesi
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = SipRouter::resolve_response_target(&next_via.value, DEFAULT_SIP_PORT) {
                 debug!(
                     event = "SIP_RESPONSE_ROUTED",
                     sip.call_id = %call_id,
                     target = %target,
-                    "🔙 Yanıt geri gönderiliyor"
+                    "🔙 Yanıt Via üzerinden geri gönderiliyor"
                 );
                 return Some((packet.clone(), Some(target)));
             }

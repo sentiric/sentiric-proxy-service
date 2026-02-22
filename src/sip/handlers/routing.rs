@@ -1,3 +1,4 @@
+// sentiric-proxy-service/src/sip/handlers/routing.rs
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use redis::AsyncCommands;
@@ -15,13 +16,10 @@ impl RoutingHandler {
         Self { redis }
     }
 
-    /// ACK istekleri için hedefi bulur.
-    /// Anahtar: proxy:route:{call_id}:{to_tag}
     pub async fn resolve_ack_target(&self, call_id: &str, to_tag: &str) -> Option<SocketAddr> {
         let target_key = if !to_tag.is_empty() {
             format!("proxy:route:{}:{}", call_id, to_tag)
         } else {
-            // Early dialogue (henüz tag yoksa)
             format!("proxy:route:{}:callee", call_id)
         };
 
@@ -40,18 +38,25 @@ impl RoutingHandler {
         None
     }
 
-    /// Çağrı durumunu kaydeder (INVITE anında).
+    // [HATA 1 ÇÖZÜMÜ A]: Redis'ten istemci IP'sini çeken yardımcı fonksiyon.
+    pub async fn get_client_source(&self, call_id: &str) -> Option<SocketAddr> {
+        let client_key = format!("proxy:route:{}:client", call_id);
+        let mut conn = self.redis.lock().await;
+        if let Ok(target_str) = conn.get::<_, String>(&client_key).await {
+            return target_str.parse::<SocketAddr>().ok();
+        }
+        None
+    }
+
     pub async fn register_call_route(&self, call_id: &str, src_addr: SocketAddr, target_addr: SocketAddr) {
         let client_key = format!("proxy:route:{}:client", call_id);
         let target_key = format!("proxy:route:{}:callee", call_id);
 
         let mut conn = self.redis.lock().await;
-        // 300 saniye TTL
         let _: () = conn.set_ex(&client_key, src_addr.to_string(), 300).await.unwrap_or_default();
         let _: () = conn.set_ex(&target_key, target_addr.to_string(), 300).await.unwrap_or_default();
     }
 
-    /// Diyalog kurulduğunda (200 OK), geçici anahtarı kalıcı tag ile günceller.
     pub async fn update_dialog_state(&self, call_id: &str, to_tag: &str) {
         if to_tag.is_empty() { return; }
 
@@ -59,7 +64,6 @@ impl RoutingHandler {
         let new_key = format!("proxy:route:{}:{}", call_id, to_tag);
         
         let mut conn = self.redis.lock().await;
-        // Rename (Atomic update)
         let _: redis::RedisResult<()> = conn.rename(&old_key, &new_key).await;
         let _: () = conn.expire(&new_key, 3600).await.unwrap_or_default();
         
