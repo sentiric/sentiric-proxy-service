@@ -35,21 +35,22 @@ impl MyProxyService {
 #[tonic::async_trait]
 impl ProxyService for MyProxyService {
     
-    #[instrument(skip_all, fields(hedef = %request.get_ref().destination_uri, metod = %request.get_ref().method))]
+    #[instrument(skip_all, fields(sip.call_id, to_uri = %request.get_ref().destination_uri, method = %request.get_ref().method))]
     async fn get_next_hop(&self, request: Request<GetNextHopRequest>) -> Result<Response<GetNextHopResponse>, Status> {
         
-        // Trace ID'yi alıyoruz (Aynı zamanda Call-ID)
         let trace_id = request.metadata().get("x-trace-id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("unknown")
             .to_string();
+        
+        // [CRITICAL FIX]: Span'e trace_id'yi (call_id) ekle.
+        tracing::Span::current().record("sip.call_id", &tracing::field::display(&trace_id));
 
         let req = request.into_inner();
         let destination_user = sip_utils::extract_username_from_uri(&req.destination_uri).to_lowercase();
         let caller_id = sip_utils::extract_username_from_uri(&req.from_uri);
 
         if self.config.internal_service_users.contains(&destination_user) {
-            // [CRITICAL FIX 1]: sip.call_id eklendi ki Observer bunu trace_id yapsın.
             info!(
                 event="ROUTE_INTERNAL_USER", 
                 sip.call_id=%trace_id, 
@@ -75,7 +76,6 @@ impl ProxyService for MyProxyService {
         if let Some(cached) = self.cache.get(&cache_key) {
             let (res, ts) = cached.value();
             if ts.elapsed() < Duration::from_secs(300) { 
-                // [CRITICAL FIX 2]: sip.call_id eklendi.
                 debug!(
                     event = "DIALPLAN_CACHE_HIT", 
                     sip.call_id=%trace_id,
@@ -91,16 +91,18 @@ impl ProxyService for MyProxyService {
         let mut dialplan_client = clients.dialplan.clone();
         drop(clients_guard);
 
+        // [CRITICAL FIX]: Trace ID'yi Dialplan isteğine enjekte et.
         let mut dialplan_req = Request::new(ResolveDialplanRequest {
             caller_contact_value: caller_id.clone(),
             destination_number: destination_user.clone(),
         });
-        let _ = dialplan_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap_or_else(|_| "unknown".parse().unwrap()));
+        if let Ok(val) = trace_id.parse() {
+            dialplan_req.metadata_mut().insert("x-trace-id", val);
+        }
 
         match dialplan_client.resolve_dialplan(dialplan_req).await {
             Ok(res) => {
                 let resolution = res.into_inner();
-                // [CRITICAL FIX 3]: sip.call_id eklendi.
                 info!(
                     event = "DIALPLAN_CACHE_MISS", 
                     sip.call_id=%trace_id,
@@ -129,9 +131,11 @@ impl MyProxyService {
                 let mut registrar_client = clients_guard.as_ref().unwrap().registrar.clone();
                 drop(clients_guard);
 
-                // [CRITICAL FIX]: Registrar isteğine Trace ID enjekte ediliyor.
+                // [CRITICAL FIX]: Trace ID'yi Registrar isteğine enjekte et.
                 let mut lookup_req = Request::new(LookupContactRequest { sip_uri: dest_uri.to_string() });
-                let _ = lookup_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap_or_else(|_| "unknown".parse().unwrap()));
+                if let Ok(val) = trace_id.parse() {
+                    lookup_req.metadata_mut().insert("x-trace-id", val);
+                }
 
                 if let Ok(lookup_res) = registrar_client.lookup_contact(lookup_req).await {
                     if let Some(target) = lookup_res.into_inner().contact_uris.first() {
