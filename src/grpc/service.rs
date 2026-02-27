@@ -51,6 +51,7 @@ impl ProxyService for MyProxyService {
         let destination_user = sip_utils::extract_username_from_uri(&req.destination_uri).to_lowercase();
         let caller_id = sip_utils::extract_username_from_uri(&req.from_uri);
 
+        // 1. Dahili Servis Kullanıcıları (Direkt Rota)
         if self.config.internal_service_users.contains(&destination_user) {
             info!(
                 event="ROUTE_INTERNAL_USER", 
@@ -63,17 +64,20 @@ impl ProxyService for MyProxyService {
             }));
         }
         
-        // [HATA 1 ÇÖZÜMÜ]: CANCEL paketleri In-Dialog routing'e girip sonsuz döngü yaratmasın!
+        // 2. In-Dialog İstekler (ACK, BYE - Direkt Rota)
+        // CANCEL paketleri In-Dialog routing'e girip sonsuz döngü yaratmasın!
         if req.is_in_dialog && req.method != "CANCEL" {
             let target_uri = req.destination_uri.replace('<', "").replace('>', "");
             debug!(event="ROUTE_IN_DIALOG", "Diyalog içi yönlendirme yapılıyor.");
             return Ok(Response::new(GetNextHopResponse { uri: target_uri, gateway_id: "direct-route-in-dialog".to_string() }));
         }
 
+        // 3. Register İstekleri (Registrar'a)
         if req.method == "REGISTER" {
             return Ok(Response::new(GetNextHopResponse { uri: self.config.registrar_sip_addr.clone(), gateway_id: "registrar-local".to_string() }));
         }
         
+        // 4. Cache Kontrolü
         let cache_key = format!("{}:{}", caller_id, destination_user);
         if let Some(cached) = self.cache.get(&cache_key) {
             let (res, ts) = cached.value();
@@ -87,6 +91,7 @@ impl ProxyService for MyProxyService {
             }
         }
 
+        // 5. Dialplan Sorgusu (Hata Toleranslı)
         let clients_guard = self.clients.lock().await;
         let clients = clients_guard.as_ref().ok_or_else(|| Status::unavailable("Proxy starting..."))?;
         let mut dialplan_client = clients.dialplan.clone();
@@ -101,6 +106,8 @@ impl ProxyService for MyProxyService {
              let _ = dialplan_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
         }
 
+        // [KRİTİK GÜNCELLEME]: Fail-Safe Fallback
+        // Dialplan servisi yanıt vermezse sistemi kilitleme, varsayılan (B2BUA) rotayı dön.
         match dialplan_client.resolve_dialplan(dialplan_req).await {
             Ok(res) => {
                 let resolution = res.into_inner();
@@ -113,8 +120,13 @@ impl ProxyService for MyProxyService {
                 self.resolve_action(&resolution, &req.destination_uri, &trace_id).await
             },
             Err(e) => {
-                error!(event="DIALPLAN_ERROR", error=%e, "Dialplan hatası, B2BUA'ya fallback yapılıyor.");
-                Ok(Response::new(GetNextHopResponse { uri: self.config.b2bua_sip_addr.clone(), gateway_id: "failsafe-b2bua".to_string() }))
+                // Burada hata fırlatmak yerine "B2BUA"ya yönlendiriyoruz.
+                // Böylece Dialplan servisi çökse bile Echo testleri ve varsayılan akış çalışmaya devam eder.
+                error!(event="DIALPLAN_ERROR", error=%e, "Dialplan servisine erişilemedi. Fail-Safe modu devreye girdi.");
+                Ok(Response::new(GetNextHopResponse { 
+                    uri: self.config.b2bua_sip_addr.clone(), 
+                    gateway_id: "failsafe-proxy-fallback".to_string() 
+                }))
             }
         }
     }
@@ -150,6 +162,7 @@ impl MyProxyService {
                 }))
             },
             _ => {
+                // Diğer tüm durumlar (AI, Echo, vb.) için B2BUA'ya yönlendir
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-ai-gateway".to_string(),

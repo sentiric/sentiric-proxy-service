@@ -19,7 +19,7 @@ pub struct InternalClients {
 
 impl InternalClients {
     pub async fn connect(config: &AppConfig) -> Result<Self> {
-        info!("🔌 İç servislere bağlanılıyor (mTLS + KeepAlive)...");
+        info!("🔌 İç servislere bağlanılıyor (mTLS + Aggressive KeepAlive)...");
 
         let registrar_channel = create_secure_channel(&config.registrar_grpc_url, "registrar-service", config).await?;
         let b2bua_channel = create_secure_channel(&config.b2bua_grpc_url, "b2bua-service", config).await?;
@@ -58,17 +58,22 @@ async fn create_secure_channel(url: &str, server_name: &str, config: &AppConfig)
         .ca_certificate(ca_certificate)
         .identity(identity);
 
-    // [KRİTİK DÜZELTME]: HTTP/2 Keep-Alive eklendi.
+    info!("🔗 Bağlantı deneniyor: {} (Timeout: 3s)", server_name);
+
+    // [KRİTİK GÜNCELLEME]: Resilience & Timeout Ayarları
+    // Bu ayarlar servisin "donmasını" engeller.
     let channel = Channel::from_shared(target_url)?
-        .connect_timeout(Duration::from_secs(5))
-        .keep_alive_while_idle(true)
-        .http2_keep_alive_interval(Duration::from_secs(15))
-        .keep_alive_timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(3))         // Bağlantı 3sn içinde kurulamazsa hata ver
+        .timeout(Duration::from_secs(3))                 // İstek 3sn içinde bitmezse iptal et
+        .keep_alive_while_idle(true)                     // Boşta olsa bile ping at
+        .http2_keep_alive_interval(Duration::from_secs(10)) // 10 saniyede bir canlılık kontrolü
+        .keep_alive_timeout(Duration::from_secs(3))      // Keepalive yanıtı gelmezse 3sn sonra kopar
+        .tcp_keepalive(Some(Duration::from_secs(10)))    // TCP seviyesinde canlılık
         .tls_config(tls_config)?
         .connect()
         .await?;
 
-    info!("gRPC bağlantısı başarılı: {}", server_name);
+    info!("✅ gRPC bağlantısı başarılı: {}", server_name);
 
     Ok(channel)
 }
