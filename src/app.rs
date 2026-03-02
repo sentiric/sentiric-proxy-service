@@ -68,19 +68,18 @@ impl App {
 
     pub async fn run(self) -> Result<()> {
         
-        // Shutdown kanalları
-        // unused variable warnings için _ ile başlayan isimler kullanıldı
         let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
         let (grpc_stop_tx, mut grpc_stop_rx) = mpsc::channel(1);
 
-        // 1. Redis
+        // 1. Redis (Auto-Healing Connection Manager)
         info!(event="REDIS_CONNECT", url=%self.config.redis_url, "Redis'e bağlanılıyor...");
         let redis_client = redis::Client::open(self.config.redis_url.as_str())?;
+        
         let redis_conn = loop {
-            match redis_client.get_multiplexed_async_connection().await {
-                Ok(conn) => break Arc::new(Mutex::new(conn)),
+            match redis::aio::ConnectionManager::new(redis_client.clone()).await {
+                Ok(conn) => break conn,
                 Err(e) => {
                     error!(event="REDIS_ERROR", error=%e, "Redis bağlantı hatası. Tekrar deneniyor...");
                     tokio::time::sleep(Duration::from_secs(5)).await;

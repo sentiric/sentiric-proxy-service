@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-proxy-service"
-version = "1.5.1"
+version = "1.5.2"
 edition = "2021"
 
 [dependencies]
@@ -12,11 +12,11 @@ hyper = { version = "0.14", features = ["full"] }
 
 # Observability
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+tracing-subscriber = { version = "0.3", features =["env-filter", "json", "registry"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-hostname = "0.3" # EKLENDİ: Hostname tespiti için
+hostname = "0.3" 
+chrono = { version = "0.4", features = ["serde"] } # [DÜZELTME]: Silinen chrono kütüphanesi geri eklendi
 
 # Config & Data
 dotenvy = "0.15"
@@ -25,8 +25,10 @@ thiserror = "1.0"
 config = "0.14"
 uuid = { version = "1.8", features = ["v4"] }
 rand = "0.8"
-redis = { version = "0.26", features = ["tokio-rustls-comp"] }
 dashmap = "5.5"
+
+# [KRİTİK DÜZELTME]: connection-manager özelliği eklendi
+redis = { version = "0.26", features =["tokio-rustls-comp", "connection-manager"] }
 
 # --- THE IRON CORE ---
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.5.6" }

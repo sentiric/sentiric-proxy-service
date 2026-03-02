@@ -1,4 +1,4 @@
-// sentiric-proxy-service/src/grpc/service.rs
+// src/grpc/service.rs
 
 use sentiric_contracts::sentiric::sip::v1::{
     proxy_service_server::ProxyService,
@@ -65,9 +65,16 @@ impl ProxyService for MyProxyService {
         }
         
         // 2. In-Dialog İstekler (ACK, BYE - Direkt Rota)
-        // CANCEL paketleri In-Dialog routing'e girip sonsuz döngü yaratmasın!
         if req.is_in_dialog && req.method != "CANCEL" {
-            let target_uri = req.destination_uri.replace('<', "").replace('>', "");
+            let mut target_uri = req.destination_uri.replace('<', "").replace('>', "");
+            
+            // [CRITICAL FIX]: Eğer In-Dialog paketi kendi Public IP'mize geliyorsa (SBC'yi bypass eden hatalı softphone)
+            // sonsuz döngüye girmemek için doğrudan B2BUA'ya yönlendir.
+            if target_uri.contains(&self.config.public_ip) {
+                debug!(event="ACK_LOOP_PREVENTED", "Public IP detected in dialog route, redirecting to B2BUA internal address.");
+                target_uri = self.config.b2bua_sip_addr.clone();
+            }
+
             debug!(event="ROUTE_IN_DIALOG", "Diyalog içi yönlendirme yapılıyor.");
             return Ok(Response::new(GetNextHopResponse { uri: target_uri, gateway_id: "direct-route-in-dialog".to_string() }));
         }
@@ -106,8 +113,6 @@ impl ProxyService for MyProxyService {
              let _ = dialplan_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
         }
 
-        // [KRİTİK GÜNCELLEME]: Fail-Safe Fallback
-        // Dialplan servisi yanıt vermezse sistemi kilitleme, varsayılan (B2BUA) rotayı dön.
         match dialplan_client.resolve_dialplan(dialplan_req).await {
             Ok(res) => {
                 let resolution = res.into_inner();
@@ -120,8 +125,6 @@ impl ProxyService for MyProxyService {
                 self.resolve_action(&resolution, &req.destination_uri, &trace_id).await
             },
             Err(e) => {
-                // Burada hata fırlatmak yerine "B2BUA"ya yönlendiriyoruz.
-                // Böylece Dialplan servisi çökse bile Echo testleri ve varsayılan akış çalışmaya devam eder.
                 error!(event="DIALPLAN_ERROR", error=%e, "Dialplan servisine erişilemedi. Fail-Safe modu devreye girdi.");
                 Ok(Response::new(GetNextHopResponse { 
                     uri: self.config.b2bua_sip_addr.clone(), 
@@ -162,7 +165,6 @@ impl MyProxyService {
                 }))
             },
             _ => {
-                // Diğer tüm durumlar (AI, Echo, vb.) için B2BUA'ya yönlendir
                 Ok(Response::new(GetNextHopResponse {
                     uri: self.config.b2bua_sip_addr.clone(),
                     gateway_id: "sentiric-ai-gateway".to_string(),

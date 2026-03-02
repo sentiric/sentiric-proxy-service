@@ -1,11 +1,10 @@
-// sentiric-proxy-service/src/sip/handlers/routing.rs
-use std::sync::Arc;
-use tokio::sync::Mutex;
+// src/sip/handlers/routing.rs
+use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use std::net::SocketAddr;
 use tracing::{debug, warn};
 
-pub type RedisConn = Arc<Mutex<redis::aio::MultiplexedConnection>>;
+pub type RedisConn = ConnectionManager;
 
 pub struct RoutingHandler {
     redis: RedisConn,
@@ -23,8 +22,12 @@ impl RoutingHandler {
             format!("proxy:route:{}:callee", call_id)
         };
 
-        let mut conn = self.redis.lock().await;
-        match conn.get::<_, String>(&target_key).await {
+        let mut conn = self.redis.clone();
+        
+        // [DÜZELTME]: Açık tip bildirimi yapıldı (E0282 Hatasını çözer)
+        let result: redis::RedisResult<String> = conn.get(&target_key).await;
+        
+        match result {
             Ok(target_str) => {
                 if let Ok(addr) = target_str.parse::<SocketAddr>() {
                     debug!("➡️ [ROUTING] Redis hedef bulundu: {} -> {}", target_key, addr);
@@ -32,17 +35,19 @@ impl RoutingHandler {
                 }
             },
             Err(_) => {
-                warn!("⚠️ [ROUTING] Redis anahtarı bulunamadı: {}", target_key);
+                warn!("⚠️[ROUTING] Redis anahtarı bulunamadı: {}", target_key);
             }
         }
         None
     }
 
-    // [HATA 1 ÇÖZÜMÜ A]: Redis'ten istemci IP'sini çeken yardımcı fonksiyon.
     pub async fn get_client_source(&self, call_id: &str) -> Option<SocketAddr> {
         let client_key = format!("proxy:route:{}:client", call_id);
-        let mut conn = self.redis.lock().await;
-        if let Ok(target_str) = conn.get::<_, String>(&client_key).await {
+        let mut conn = self.redis.clone();
+        
+        //[DÜZELTME]: Açık tip bildirimi yapıldı
+        let result: redis::RedisResult<String> = conn.get(&client_key).await;
+        if let Ok(target_str) = result {
             return target_str.parse::<SocketAddr>().ok();
         }
         None
@@ -52,9 +57,11 @@ impl RoutingHandler {
         let client_key = format!("proxy:route:{}:client", call_id);
         let target_key = format!("proxy:route:{}:callee", call_id);
 
-        let mut conn = self.redis.lock().await;
-        let _: () = conn.set_ex(&client_key, src_addr.to_string(), 300).await.unwrap_or_default();
-        let _: () = conn.set_ex(&target_key, target_addr.to_string(), 300).await.unwrap_or_default();
+        let mut conn = self.redis.clone();
+        
+        // [DÜZELTME]: unwrap_or_default() yerine RedisResult ile sessiz atama yapıldı
+        let _: redis::RedisResult<()> = conn.set_ex(&client_key, src_addr.to_string(), 300).await;
+        let _: redis::RedisResult<()> = conn.set_ex(&target_key, target_addr.to_string(), 300).await;
     }
 
     pub async fn update_dialog_state(&self, call_id: &str, to_tag: &str) {
@@ -63,9 +70,11 @@ impl RoutingHandler {
         let old_key = format!("proxy:route:{}:callee", call_id);
         let new_key = format!("proxy:route:{}:{}", call_id, to_tag);
         
-        let mut conn = self.redis.lock().await;
+        let mut conn = self.redis.clone();
+        
+        // [DÜZELTME]: Açık tip bildirimi yapıldı
         let _: redis::RedisResult<()> = conn.rename(&old_key, &new_key).await;
-        let _: () = conn.expire(&new_key, 3600).await.unwrap_or_default();
+        let _: redis::RedisResult<()> = conn.expire(&new_key, 3600).await;
         
         debug!("💾 [ROUTING] Dialog Tag Güncellendi: {} -> {}", call_id, to_tag);
     }
