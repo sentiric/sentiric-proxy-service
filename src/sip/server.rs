@@ -1,4 +1,4 @@
-// src/sip/server.rs
+// sentiric-proxy-service/src/sip/server.rs
 
 use crate::config::AppConfig;
 use crate::sip::engine::ProxyEngine;
@@ -10,55 +10,50 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::lookup_host;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc; //[DÜZELTME]: Mutex kaldırıldı.
 use tracing::{debug, error, info, warn};
+use dashmap::DashMap;
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
-#[derive(Default)]
-struct DnsCache {
-    addr: Option<(SocketAddr, Instant)>,
-}
-
 pub struct ProxyState {
-    #[allow(dead_code)] 
-    b2bua_cache: Mutex<DnsCache>,
+    // Dashmap ile thread-safe DNS Cache: Hostname -> (IP, Son_Güncellenme)
+    dns_cache: DashMap<String, (SocketAddr, Instant)>,
 }
 
 impl ProxyState {
     pub fn new() -> Self {
         Self {
-            b2bua_cache: Mutex::new(DnsCache::default()),
+            dns_cache: DashMap::new(),
         }
     }
 
     pub async fn resolve_addr(&self, hostname: &str) -> Result<SocketAddr> {
+        // Eğer zaten IP adresi ise direkt dön
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Ok(addr);
         }
 
-        debug!(event="DNS_RESOLVE", host=%hostname, "DNS Çözümleniyor");
+        let now = Instant::now();
+        
+        // 1. Önbellekte var mı ve 60 saniyeden yeni mi?
+        if let Some(cached) = self.dns_cache.get(hostname) {
+            let (addr, timestamp) = *cached;
+            if now.duration_since(timestamp) < Duration::from_secs(60) {
+                // Ön bellekten hızlı yanıt (0 ms)
+                return Ok(addr);
+            }
+        }
+
+        // 2. Yoksa veya süresi dolduysa DNS sorgusu yap
+        debug!(event="DNS_RESOLVE_NETWORK", host=%hostname, "DNS ağdan çözümleniyor...");
         let addr = lookup_host(hostname)
             .await?
             .next()
             .ok_or_else(|| anyhow!("DNS kaydı bulunamadı: {}", hostname))?;
         
-        Ok(addr)
-    }
-
-    #[allow(dead_code)]
-    pub async fn resolve_b2bua_addr(&self, hostname: &str) -> Result<SocketAddr> {
-        let mut cache = self.b2bua_cache.lock().await;
-        let now = Instant::now();
-
-        if let Some((addr, timestamp)) = cache.addr {
-            if now.duration_since(timestamp) < Duration::from_secs(60) {
-                return Ok(addr);
-            }
-        }
-
-        let addr = self.resolve_addr(hostname).await?;
-        cache.addr = Some((addr, now));
+        // 3. Sonucu önbelleğe kaydet
+        self.dns_cache.insert(hostname.to_string(), (addr, now));
         Ok(addr)
     }
 }
@@ -117,24 +112,20 @@ impl SipServer {
 
                             match parser::parse(data) {
                                 Ok(mut packet) => {
-                                    // 1. INGRESS LOG (SUTS v4.0)
-                                    // Observer için en önemli log. Trace başlangıcı.
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
                                     let method = packet.method.as_str();
                                     
                                     debug!(
                                         event = "SIP_PACKET_RECEIVED",
-                                        sip.call_id = %call_id, // -> Trace ID olacak
+                                        sip.call_id = %call_id,
                                         sip.method = %method,
                                         net.src.ip = %src_addr.ip(),
                                         net.src.port = src_addr.port(),
                                         "📥 SIP paketi alındı"
                                     );
 
-                                    // 2. ENGINE PROCESS
                                     if let Some((resp_packet, target_addr_opt)) = self.engine.process_packet(&mut packet, src_addr).await {
                                         if let Some(dest) = target_addr_opt {
-                                            // 3. EGRESS LOG (SUTS v4.0)
                                             let resp_method = resp_packet.method.as_str();
                                             info!(
                                                 event = "SIP_PACKET_SENT",

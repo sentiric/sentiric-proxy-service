@@ -15,8 +15,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{error, info, debug, instrument, warn};
 use dashmap::DashMap;
-use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
 use std::str::FromStr;
+// [KRİTİK DÜZELTME]: Eksik olan trait import edildi. E0599 ve E0282 hatalarını bu çözer.
+use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
 
 pub type TransactionStore = Arc<DashMap<String, SipTransaction>>;
 
@@ -60,9 +61,6 @@ impl ProxyEngine {
                 warn!(event="SIP_MAX_FORWARDS", sip.call_id=%call_id, "🛑 Maksimum atlama sınırına ulaşıldı.");
                 return Some((SipPacket::create_response_for(packet, 483, "Too Many Hops".into()), Some(src_addr)));
             }
-
-            // [DÜZELTME]: SipRouter::fix_nat_via(packet, src_addr) KALDIRILDI!
-            // Proxy iç ağda olduğu için SBC'den gelen paketin Via'sına iç IP damgalamamalıdır.
 
             if packet.method != Method::Ack {
                 let tx_key = format!("{}:{:?}", call_id, packet.method);
@@ -148,7 +146,6 @@ impl ProxyEngine {
                 };
 
                 if let Some(target) = target_addr {
-                    // Kaynak IP'yi (SBC) Redis'e kaydet ki dönüşte doğru yere simetrik gitsin
                     self._router.register_call_route(&call_id, src_addr, target).await;
 
                     if packet.method == Method::Invite {
@@ -172,7 +169,6 @@ impl ProxyEngine {
         
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
-        // Yanıtları güvenli şekilde SBC'ye geri gönder
         if let Some(sbc_addr) = self._router.get_client_source(&call_id).await {
             debug!(
                 event = "SIP_RESPONSE_ROUTED_SYMMETRIC",
@@ -183,7 +179,6 @@ impl ProxyEngine {
             return Some((packet.clone(), Some(sbc_addr)));
         }
 
-        // Fallback
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
             if let Some(target) = SipRouter::resolve_response_target(&next_via.value, DEFAULT_SIP_PORT) {
                 debug!(

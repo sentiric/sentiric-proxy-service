@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "sentiric-proxy-service"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "anyhow",
  "chrono",
