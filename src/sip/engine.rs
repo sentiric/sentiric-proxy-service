@@ -136,6 +136,7 @@ impl ProxyEngine {
                 let target_addr = if let Some(extracted_socket) = sip_core_utils::extract_socket_addr(&next_hop_uri) {
                     Some(extracted_socket)
                 } else {
+                    // DNS Cache kullanımı zorunlu tutuluyor
                     match self.state.resolve_addr(&next_hop_uri).await {
                         Ok(addr) => Some(addr),
                         Err(e) => {
