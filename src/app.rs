@@ -110,25 +110,15 @@ impl App {
                 .context("gRPC sunucusu çöktü")
         });
 
-        // 4. Client Manager
-        let config_clone = self.config.clone();
+        // 4. Client Manager (Lazy Connect - No Retry Loop Needed)
         let clients_container_clone = clients_container.clone();
-        tokio::spawn(async move {
-            loop {
-                match InternalClients::connect(&config_clone).await {
-                    Ok(c) => {
-                        let mut guard = clients_container_clone.lock().await;
-                        *guard = Some(c);
-                        info!(event="CLIENTS_CONNECTED", "Dış servis bağlantıları sağlandı.");
-                        break;
-                    },
-                    Err(e) => {
-                        warn!(event="CLIENT_CONNECT_FAIL", error=%e, "Bağlantı hatası, tekrar deneniyor...");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                    }
-                }
-            }
-        });
+        let config_clone = self.config.clone();
+        
+        let clients = InternalClients::connect(&config_clone).await.context("İstemciler başlatılamadı")?;
+        {
+            let mut guard = clients_container_clone.lock().await;
+            *guard = Some(clients);
+        }
 
         // 5. SIP Server
         let sip_config = self.config.clone();

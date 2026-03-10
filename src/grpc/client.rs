@@ -6,8 +6,7 @@ use sentiric_contracts::sentiric::sip::v1::registrar_service_client::RegistrarSe
 use sentiric_contracts::sentiric::sip::v1::b2bua_service_client::B2buaServiceClient;
 use sentiric_contracts::sentiric::dialplan::v1::dialplan_service_client::DialplanServiceClient;
 
-use tonic::transport::{Channel, ClientTlsConfig, Certificate, Identity};
-use std::time::Duration;
+use tonic::transport::{Channel, ClientTlsConfig, Certificate, Identity, Endpoint};
 use tracing::{info, warn};
 
 #[derive(Clone)]
@@ -19,13 +18,27 @@ pub struct InternalClients {
 
 impl InternalClients {
     pub async fn connect(config: &AppConfig) -> Result<Self> {
-        info!("🔌 İç servislere bağlanılıyor (mTLS + Aggressive KeepAlive)...");
+        info!("🔌 İç servislere bağlanılıyor (mTLS + Lazy Connect)...");
 
-        let registrar_channel = create_secure_channel(&config.registrar_grpc_url, "registrar-service", config).await?;
-        let b2bua_channel = create_secure_channel(&config.b2bua_grpc_url, "b2bua-service", config).await?;
-        let dialplan_channel = create_secure_channel(&config.dialplan_grpc_url, "dialplan-service", config).await?;
+        // TLS Config'i bir kere oluştur
+        let tls_config = if !config.ca_path.is_empty() {
+            match load_tls_config(config).await {
+                Ok(cfg) => Some(cfg),
+                Err(e) => {
+                    warn!("⚠️ mTLS sertifikaları yüklenemedi, güvensiz mod denenecek: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
-        info!("✅ Tüm dış gRPC istemcileri başarıyla oluşturuldu.");
+        // connect_lazy ile anında Endpoint'leri bağla (Bekleme yapmaz)
+        let registrar_channel = connect_endpoint(&config.registrar_grpc_url, "registrar-service", &tls_config).await?;
+        let b2bua_channel = connect_endpoint(&config.b2bua_grpc_url, "b2bua-service", &tls_config).await?;
+        let dialplan_channel = connect_endpoint(&config.dialplan_grpc_url, "dialplan-service", &tls_config).await?;
+
+        info!("✅ Tüm dış gRPC istemcileri yapılandırıldı (Lazy Mode).");
 
         Ok(Self {
             registrar: RegistrarServiceClient::new(registrar_channel),
@@ -35,7 +48,7 @@ impl InternalClients {
     }
 }
 
-async fn create_secure_channel(url: &str, server_name: &str, config: &AppConfig) -> Result<Channel> {
+async fn connect_endpoint(url: &str, server_name: &str, tls_config: &Option<ClientTlsConfig>) -> Result<Channel> {
     let target_url = if url.starts_with("http") {
         if url.starts_with("http://") {
              warn!("⚠️ Güvensiz URL tespit edildi ({}), HTTPS'e zorlanıyor.", url);
@@ -47,33 +60,28 @@ async fn create_secure_channel(url: &str, server_name: &str, config: &AppConfig)
         format!("https://{}", url)
     };
 
+    let mut endpoint = Endpoint::from_shared(target_url)?;
+
+    if let Some(tls) = tls_config {
+        // SNI (Server Name Indication) Override
+        let tls_with_sni = tls.clone().domain_name(server_name);
+        endpoint = endpoint.tls_config(tls_with_sni)?;
+    }
+
+    // [KRİTİK MİMARİ DEĞİŞİKLİK]: connect().await YERİNE connect_lazy()
+    // Servis anında ayağa kalkar. Gerçek TCP/mTLS bağlantısı ilk çağrıda (INVITE gelince) kurulur.
+    Ok(endpoint.connect_lazy())
+}
+
+async fn load_tls_config(config: &AppConfig) -> Result<ClientTlsConfig> {
     let cert = tokio::fs::read(&config.cert_path).await?;
     let key = tokio::fs::read(&config.key_path).await?;
     let identity = Identity::from_pem(cert, key);
+    
     let ca_cert = tokio::fs::read(&config.ca_path).await?;
     let ca_certificate = Certificate::from_pem(ca_cert);
 
-    let tls_config = ClientTlsConfig::new()
-        .domain_name(server_name)
+    Ok(ClientTlsConfig::new()
         .ca_certificate(ca_certificate)
-        .identity(identity);
-
-    info!("🔗 Bağlantı deneniyor: {} (Timeout: 3s)", server_name);
-
-    // [KRİTİK GÜNCELLEME]: Resilience & Timeout Ayarları
-    // Bu ayarlar servisin "donmasını" engeller.
-    let channel = Channel::from_shared(target_url)?
-        .connect_timeout(Duration::from_secs(3))         // Bağlantı 3sn içinde kurulamazsa hata ver
-        .timeout(Duration::from_secs(3))                 // İstek 3sn içinde bitmezse iptal et
-        .keep_alive_while_idle(true)                     // Boşta olsa bile ping at
-        .http2_keep_alive_interval(Duration::from_secs(10)) // 10 saniyede bir canlılık kontrolü
-        .keep_alive_timeout(Duration::from_secs(3))      // Keepalive yanıtı gelmezse 3sn sonra kopar
-        .tcp_keepalive(Some(Duration::from_secs(10)))    // TCP seviyesinde canlılık
-        .tls_config(tls_config)?
-        .connect()
-        .await?;
-
-    info!("✅ gRPC bağlantısı başarılı: {}", server_name);
-
-    Ok(channel)
+        .identity(identity))
 }
