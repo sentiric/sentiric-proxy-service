@@ -1,4 +1,4 @@
-// src/grpc/service.rs
+// sentiric-proxy-service/src/grpc/service.rs
 
 use sentiric_contracts::sentiric::sip::v1::{
     proxy_service_server::ProxyService,
@@ -11,7 +11,7 @@ use sentiric_contracts::sentiric::dialplan::v1::{
 use sentiric_sip_core::utils as sip_utils;
 
 use tonic::{Request, Response, Status};
-use tracing::{error, instrument, debug, info, Span}; 
+use tracing::{error, warn, instrument, info, Span}; 
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::{Instant, Duration};
@@ -53,11 +53,6 @@ impl ProxyService for MyProxyService {
 
         // 1. Dahili Servis Kullanıcıları (Direkt Rota)
         if self.config.internal_service_users.contains(&destination_user) {
-            info!(
-                event="ROUTE_INTERNAL_USER", 
-                user=%destination_user, 
-                "Dahili servis kullanıcısı tespit edildi."
-            );
             return Ok(Response::new(GetNextHopResponse {
                 uri: self.config.b2bua_sip_addr.clone(),
                 gateway_id: format!("core-internal-{}", destination_user),
@@ -67,15 +62,9 @@ impl ProxyService for MyProxyService {
         // 2. In-Dialog İstekler (ACK, BYE - Direkt Rota)
         if req.is_in_dialog && req.method != "CANCEL" {
             let mut target_uri = req.destination_uri.replace('<', "").replace('>', "");
-            
-            // [CRITICAL FIX]: Eğer In-Dialog paketi kendi Public IP'mize geliyorsa (SBC'yi bypass eden hatalı softphone)
-            // sonsuz döngüye girmemek için doğrudan B2BUA'ya yönlendir.
             if target_uri.contains(&self.config.public_ip) {
-                debug!(event="ACK_LOOP_PREVENTED", "Public IP detected in dialog route, redirecting to B2BUA internal address.");
                 target_uri = self.config.b2bua_sip_addr.clone();
             }
-
-            debug!(event="ROUTE_IN_DIALOG", "Diyalog içi yönlendirme yapılıyor.");
             return Ok(Response::new(GetNextHopResponse { uri: target_uri, gateway_id: "direct-route-in-dialog".to_string() }));
         }
 
@@ -89,43 +78,58 @@ impl ProxyService for MyProxyService {
         if let Some(cached) = self.cache.get(&cache_key) {
             let (res, ts) = cached.value();
             if ts.elapsed() < Duration::from_secs(300) { 
-                info!(
-                    event = "DIALPLAN_CACHE_HIT", 
-                    cache.key = %cache_key, 
-                    "⚡ Dialplan önbellekten getirildi"
-                );
                 return self.resolve_action(res, &req.destination_uri, &trace_id).await;
             }
         }
 
-        // 5. Dialplan Sorgusu (Hata Toleranslı)
+        // 5. [SMART RETRY ENGINE] Dialplan Sorgusu
         let clients_guard = self.clients.lock().await;
-        let clients = clients_guard.as_ref().ok_or_else(|| Status::unavailable("Proxy starting..."))?;
-        let mut dialplan_client = clients.dialplan.clone();
+        let clients_ref = clients_guard.as_ref().ok_or_else(|| Status::unavailable("Proxy starting..."))?;
+        let mut dialplan_client = clients_ref.dialplan.clone(); // Lock'ı hızlı bırakmak için clone'la
         drop(clients_guard);
 
-        let mut dialplan_req = Request::new(ResolveDialplanRequest {
-            caller_contact_value: caller_id.clone(),
-            destination_number: destination_user.clone(),
-        });
-        
-        if trace_id != "unknown" {
-             let _ = dialplan_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
-        }
+        let max_retries = 3;
+        let mut attempt = 0;
+        let mut backoff = Duration::from_millis(500);
 
-        match dialplan_client.resolve_dialplan(dialplan_req).await {
+        let resolution = loop {
+            attempt += 1;
+            let start = Instant::now();
+            
+            // Request her döngüde yeniden oluşturulmalı çünkü consume ediliyor
+            let mut dp_req = Request::new(ResolveDialplanRequest {
+                caller_contact_value: caller_id.clone(),
+                destination_number: destination_user.clone(),
+            });
+            if trace_id != "unknown" {
+                let _ = dp_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
+            }
+
+            info!(event="GRPC_OUT_ATTEMPT", grpc.target="dialplan-service", grpc.method="ResolveDialplan", attempt=attempt, "📡 Dialplan servisine istek atılıyor...");
+
+            match dialplan_client.resolve_dialplan(dp_req).await {
+                Ok(res) => {
+                    info!(event="GRPC_OUT_SUCCESS", grpc.target="dialplan-service", grpc.method="ResolveDialplan", attempt=attempt, latency_ms=start.elapsed().as_millis(), "✅ Dialplan başarıyla yanıt verdi.");
+                    break Ok(res.into_inner());
+                },
+                Err(e) => {
+                    warn!(event="GRPC_OUT_FAIL", grpc.target="dialplan-service", grpc.method="ResolveDialplan", attempt=attempt, latency_ms=start.elapsed().as_millis(), error=%e, "⚠️ Dialplan çağrısı başarısız.");
+                    if attempt >= max_retries {
+                        break Err(e);
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2; // 500ms, 1000ms...
+                }
+            }
+        };
+
+        match resolution {
             Ok(res) => {
-                let resolution = res.into_inner();
-                info!(
-                    event = "DIALPLAN_CACHE_MISS", 
-                    cache.key = %cache_key, 
-                    "Dialplan servisinden yeni rota öğrenildi"
-                );
-                self.cache.insert(cache_key, (resolution.clone(), Instant::now()));
-                self.resolve_action(&resolution, &req.destination_uri, &trace_id).await
+                self.cache.insert(cache_key, (res.clone(), Instant::now()));
+                self.resolve_action(&res, &req.destination_uri, &trace_id).await
             },
             Err(e) => {
-                error!(event="DIALPLAN_ERROR", error=%e, "Dialplan servisine erişilemedi. Fail-Safe modu devreye girdi.");
+                error!(event="DIALPLAN_FATAL_ERROR", error=%e, "❌ Dialplan servisine {} denemede erişilemedi. Failsafe rota devreye giriyor.", max_retries);
                 Ok(Response::new(GetNextHopResponse { 
                     uri: self.config.b2bua_sip_addr.clone(), 
                     gateway_id: "failsafe-proxy-fallback".to_string() 
@@ -151,6 +155,7 @@ impl MyProxyService {
                      let _ = lookup_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
                 }
 
+                // Basit Registrar Call (Buraya da retry eklenebilir, şimdilik direkt geçiyoruz)
                 if let Ok(lookup_res) = registrar_client.lookup_contact(lookup_req).await {
                     if let Some(target) = lookup_res.into_inner().contact_uris.first() {
                         return Ok(Response::new(GetNextHopResponse {
