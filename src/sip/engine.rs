@@ -1,5 +1,4 @@
-// sentiric-proxy-service/src/sip/engine.rs
-
+// Dosya: src/sip/engine.rs
 use crate::config::AppConfig;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::handlers::routing::{RoutingHandler, RedisConn};
@@ -16,7 +15,6 @@ use std::sync::Arc;
 use tracing::{error, info, debug, instrument, warn};
 use dashmap::DashMap;
 use std::str::FromStr;
-// [KRİTİK DÜZELTME]: Eksik olan trait import edildi. E0599 ve E0282 hatalarını bu çözer.
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
 
 pub type TransactionStore = Arc<DashMap<String, SipTransaction>>;
@@ -102,6 +100,21 @@ impl ProxyEngine {
         let in_dialog = packet.is_in_dialog_request();
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
+        // [MİMARİ DÜZELTME]: Outbound In-Dialog Yönlendirme (B2BUA -> UAC via SBC)
+        let is_from_b2bua = if let Ok(mut addrs) = tokio::net::lookup_host(&self.config.b2bua_sip_addr).await {
+            addrs.any(|a| a.ip() == src_addr.ip())
+        } else {
+            false
+        };
+
+        if in_dialog && packet.method != Method::Cancel && is_from_b2bua {
+            if let Some(sbc_addr) = self._router.get_client_source(&call_id).await {
+                info!(event="SIP_OUTBOUND_IN_DIALOG", sip.call_id=%call_id, target=%sbc_addr, "Yönlendirme SBC üzerinden dışarı yapılıyor");
+                SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
+                return Some((packet.clone(), Some(sbc_addr)));
+            }
+        }
+
         let mut request = tonic::Request::new(
             sentiric_contracts::sentiric::sip::v1::GetNextHopRequest {
                 destination_uri: dest_uri.clone(),
@@ -136,7 +149,6 @@ impl ProxyEngine {
                 let target_addr = if let Some(extracted_socket) = sip_core_utils::extract_socket_addr(&next_hop_uri) {
                     Some(extracted_socket)
                 } else {
-                    // DNS Cache kullanımı zorunlu tutuluyor
                     match self.state.resolve_addr(&next_hop_uri).await {
                         Ok(addr) => Some(addr),
                         Err(e) => {
