@@ -44,11 +44,12 @@ impl App {
         
         if config.log_format == "json" {
             let suts_formatter = SutsFormatter::new(
-                "proxy-service".to_string(),
+                "sip-proxy-service".to_string(), // [CRITICAL FIX] Log service ismi güncellendi.
                 config.service_version.clone(),
                 config.env.clone(),
                 config.node_hostname.clone(),
             );
+            
             subscriber.with(fmt::layer().event_format(suts_formatter)).init();
         } else {
             subscriber.with(fmt::layer().compact()).init();

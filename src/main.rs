@@ -1,6 +1,6 @@
-// sentiric-proxy-service/src/main.rs
+// src/main.rs
 use anyhow::{Context, Result};
-use sentiric_proxy_service::app::App;
+use sentiric_sip_proxy_service::app::App;
 use std::process;
 
 fn main() -> Result<()> {

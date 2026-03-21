@@ -1,3 +1,5 @@
+// Dosya: src/config.rs
+
 use anyhow::{Context, Result};
 use std::env;
 use std::net::SocketAddr;
@@ -32,11 +34,13 @@ pub struct AppConfig {
     pub ca_path: String,
 }
 
+
+// [ARCH-COMPLIANCE] Çevresel değişken ön ekleri SIP_PROXY_SERVICE olarak düzeltildi.
 impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
-        let grpc_port = env::var("PROXY_SERVICE_GRPC_PORT").unwrap_or_else(|_| "13071".to_string());
-        let http_port = env::var("PROXY_SERVICE_HTTP_PORT").unwrap_or_else(|_| "13070".to_string());
-        let sip_port_str = env::var("PROXY_SERVICE_SIP_PORT").unwrap_or_else(|_| "13074".to_string());
+        let grpc_port = env::var("SIP_PROXY_SERVICE_GRPC_PORT").unwrap_or_else(|_| "13071".to_string());
+        let http_port = env::var("SIP_PROXY_SERVICE_HTTP_PORT").unwrap_or_else(|_| "13070".to_string());
+        let sip_port_str = env::var("SIP_PROXY_SERVICE_SIP_PORT").unwrap_or_else(|_| "13074".to_string());
         let sip_port = sip_port_str.parse::<u16>().context("Geçersiz SIP portu")?;
         
         let grpc_addr: SocketAddr = format!("[::]:{}", grpc_port).parse()?;
@@ -54,24 +58,24 @@ impl AppConfig {
             http_listen_addr: http_addr, 
             sip_bind_ip: "0.0.0.0".to_string(),
             sip_port,
-            proxy_advertised_host: env::var("PROXY_SERVICE_ADVERTISED_HOST").unwrap_or_else(|_| "proxy-service".to_string()),
+            proxy_advertised_host: env::var("SIP_PROXY_SERVICE_ADVERTISED_HOST").unwrap_or_else(|_| "sip-proxy-service".to_string()),
             public_ip,
             registrar_grpc_url: env::var("REGISTRAR_SERVICE_TARGET_GRPC_URL").unwrap_or_default(),
             b2bua_grpc_url: env::var("B2BUA_SERVICE_TARGET_GRPC_URL").unwrap_or_default(),
             dialplan_grpc_url: env::var("DIALPLAN_SERVICE_TARGET_GRPC_URL").unwrap_or_default(),
             redis_url: env::var("REDIS_URL").context("REDIS_URL eksik")?,
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET").context("B2BUA_SERVICE_SIP_TARGET eksik")?,
-            registrar_sip_addr: env::var("REGISTRAR_SERVICE_SIP_TARGET").unwrap_or_else(|_| "proxy-service:13074".to_string()),
+            registrar_sip_addr: env::var("REGISTRAR_SERVICE_SIP_TARGET").unwrap_or_else(|_| "sip-proxy-service:13074".to_string()),
             internal_service_users,
 
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "json".to_string()),
-            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.5.1".to_string()),
-            node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()), // YENİ
+            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.5.7".to_string()),
+            node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()), 
 
-            cert_path: env::var("PROXY_SERVICE_CERT_PATH").context("CERT PATH eksik")?,
-            key_path: env::var("PROXY_SERVICE_KEY_PATH").context("KEY PATH eksik")?,
+            cert_path: env::var("SIP_PROXY_SERVICE_CERT_PATH").context("CERT PATH eksik")?,
+            key_path: env::var("SIP_PROXY_SERVICE_KEY_PATH").context("KEY PATH eksik")?,
             ca_path: env::var("GRPC_TLS_CA_PATH").context("CA PATH eksik")?,
         })
     }

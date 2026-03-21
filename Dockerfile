@@ -17,7 +17,7 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 ENV BUILD_DATE=${BUILD_DATE}
 ENV SERVICE_VERSION=${SERVICE_VERSION}
 
-RUN cargo build --release --bin sentiric-proxy-service
+RUN cargo build --release --bin sentiric-sip-proxy-service
 
 # --- STAGE 2: Final (Minimal) Image ---
 FROM debian:bookworm-slim
@@ -36,8 +36,8 @@ ENV SERVICE_VERSION=${SERVICE_VERSION}
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/sentiric-proxy-service .
+COPY --from=builder /app/target/release/sentiric-sip-proxy-service .
 
 RUN useradd -m -u 1001 appuser
 USER appuser
-ENTRYPOINT ["./sentiric-proxy-service"]
+ENTRYPOINT ["./sentiric-sip-proxy-service"]
