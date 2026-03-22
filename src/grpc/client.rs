@@ -1,5 +1,4 @@
-// sentiric-proxy-service/src/grpc/client.rs
-
+// Dosya: sentiric-sip-proxy-service/src/grpc/client.rs
 use crate::config::AppConfig;
 use anyhow::Result; 
 use sentiric_contracts::sentiric::sip::v1::registrar_service_client::RegistrarServiceClient;
@@ -33,9 +32,9 @@ impl InternalClients {
             None
         };
 
-        // connect_lazy ile anında Endpoint'leri bağla (Bekleme yapmaz)
-        let registrar_channel = connect_endpoint(&config.registrar_grpc_url, "registrar-service", &tls_config).await?;
-        let b2bua_channel = connect_endpoint(&config.b2bua_grpc_url, "b2bua-service", &tls_config).await?;
+        // [ARCH-COMPLIANCE] SNI isimleri sertifikalarla (services.txt) birebir eşleşecek şekilde düzeltildi.
+        let registrar_channel = connect_endpoint(&config.registrar_grpc_url, "sip-registrar-service", &tls_config).await?;
+        let b2bua_channel = connect_endpoint(&config.b2bua_grpc_url, "sip-b2bua-service", &tls_config).await?;
         let dialplan_channel = connect_endpoint(&config.dialplan_grpc_url, "dialplan-service", &tls_config).await?;
 
         info!("✅ Tüm dış gRPC istemcileri yapılandırıldı (Lazy Mode).");
