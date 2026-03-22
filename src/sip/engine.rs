@@ -17,7 +17,6 @@ use std::sync::Arc;
 use tracing::{error, info, debug, instrument, warn};
 use dashmap::DashMap;
 
-//[KRİTİK DÜZELTME]: Eksik olan Trait Import eklendi (E0599 ve E0282 hatasını çözer)
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
 
 pub type TransactionStore = Arc<DashMap<String, SipTransaction>>;
@@ -63,12 +62,20 @@ impl ProxyEngine {
                 return Some((SipResponseFactory::create_error(packet, 483, "Too Many Hops"), Some(src_addr)));
             }
 
+            //[MİMARİ DÜZELTME]: İşlem anahtarına (Transaction Key) 'branch' eklendi.
+            // Bu sayede aynı çağrıdaki şifresiz ve şifreli (Auth) paketler ayrı işlemler olarak tanınır.
             if packet.method != Method::Ack {
-                let tx_key = format!("{}:{:?}", call_id, packet.method);
+                let branch = packet.get_header_value(HeaderName::Via)
+                    .and_then(|v| v.split("branch=").nth(1))
+                    .and_then(|v| v.split(';').next())
+                    .unwrap_or("unknown_branch");
+
+                let tx_key = format!("{}:{}:{:?}", call_id, branch, packet.method);
+                
                 let action = if let Some(tx) = self.transactions.get(&tx_key) {
                     TransactionEngine::check(&Some(tx.clone()), packet)
                 } else {
-                    if let Some(new_tx) = SipTransaction::new(packet) { self.transactions.insert(tx_key, new_tx); }
+                    if let Some(new_tx) = SipTransaction::new(packet) { self.transactions.insert(tx_key.clone(), new_tx); }
                     TransactionAction::ForwardToApp
                 };
 
@@ -78,18 +85,30 @@ impl ProxyEngine {
                         return Some((cached_resp, Some(src_addr)));
                     },
                     TransactionAction::Ignore => return None,
-                    TransactionAction::ForwardToApp => {}
+                    TransactionAction::ForwardToApp => {
+                        packet.headers.retain(|h| {
+                            if h.name == HeaderName::Route {
+                                !h.value.contains(&self.config.proxy_advertised_host) && 
+                                !h.value.contains(&self.config.public_ip)
+                            } else {
+                                true
+                            }
+                        });
+
+                        // İsteği işle ve dönen yanıtı yakala
+                        let response_tuple = self.handle_request(packet, src_addr).await;
+                        
+                        //[MİMARİ DÜZELTME]: Dönen yanıtı (Örn: 401 veya 200) State'e (Transaction) kaydet.
+                        if let Some((ref resp_packet, _)) = response_tuple {
+                            if let Some(mut tx) = self.transactions.get_mut(&tx_key) {
+                                tx.update_with_response(resp_packet);
+                            }
+                        }
+                        
+                        return response_tuple;
+                    }
                 }
             }
-
-            packet.headers.retain(|h| {
-                if h.name == HeaderName::Route {
-                    !h.value.contains(&self.config.proxy_advertised_host) && 
-                    !h.value.contains(&self.config.public_ip)
-                } else {
-                    true
-                }
-            });
 
             self.handle_request(packet, src_addr).await
         } else {
