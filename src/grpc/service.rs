@@ -1,5 +1,4 @@
-// sentiric-proxy-service/src/grpc/service.rs
-
+// Dosya: sentiric-sip-proxy-service/src/grpc/service.rs
 use sentiric_contracts::sentiric::sip::v1::{
     proxy_service_server::ProxyService,
     GetNextHopRequest, GetNextHopResponse,
@@ -22,9 +21,9 @@ use crate::grpc::client::InternalClients;
 type DialplanCache = DashMap<String, (ResolveDialplanResponse, Instant)>;
 
 pub struct MyProxyService {
-    config: Arc<AppConfig>,
-    clients: Arc<Mutex<Option<InternalClients>>>,
-    cache: DialplanCache,
+    pub config: Arc<AppConfig>,
+    pub clients: Arc<Mutex<Option<InternalClients>>>,
+    pub cache: DialplanCache,
 }
 
 impl MyProxyService {
@@ -68,12 +67,9 @@ impl ProxyService for MyProxyService {
             return Ok(Response::new(GetNextHopResponse { uri: target_uri, gateway_id: "direct-route-in-dialog".to_string() }));
         }
 
-        // 3. Register İstekleri (Registrar'a)
-        if req.method == "REGISTER" {
-            return Ok(Response::new(GetNextHopResponse { uri: self.config.registrar_sip_addr.clone(), gateway_id: "registrar-local".to_string() }));
-        }
+        // [ARCH-COMPLIANCE] "REGISTER" yönlendirmesi silindi, çünkü artık UDP olarak yönlendirilmeyecek. Motor bizzat çözecek.
         
-        // 4. Cache Kontrolü
+        // 3. Cache Kontrolü
         let cache_key = format!("{}:{}", caller_id, destination_user);
         if let Some(cached) = self.cache.get(&cache_key) {
             let (res, ts) = cached.value();
@@ -82,7 +78,7 @@ impl ProxyService for MyProxyService {
             }
         }
 
-        // 5. [SMART RETRY ENGINE] Dialplan Sorgusu
+        // 4. [SMART RETRY ENGINE] Dialplan Sorgusu
         let clients_guard = self.clients.lock().await;
         let clients_ref = clients_guard.as_ref().ok_or_else(|| Status::unavailable("Proxy starting..."))?;
         let mut dialplan_client = clients_ref.dialplan.clone(); // Lock'ı hızlı bırakmak için clone'la
@@ -118,7 +114,7 @@ impl ProxyService for MyProxyService {
                         break Err(e);
                     }
                     tokio::time::sleep(backoff).await;
-                    backoff *= 2; // 500ms, 1000ms...
+                    backoff *= 2; 
                 }
             }
         };
@@ -155,7 +151,6 @@ impl MyProxyService {
                      let _ = lookup_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
                 }
 
-                // Basit Registrar Call (Buraya da retry eklenebilir, şimdilik direkt geçiyoruz)
                 if let Ok(lookup_res) = registrar_client.lookup_contact(lookup_req).await {
                     if let Some(target) = lookup_res.into_inner().contact_uris.first() {
                         return Ok(Response::new(GetNextHopResponse {
