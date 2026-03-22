@@ -1,9 +1,11 @@
 // Dosya: sentiric-sip-proxy-service/src/grpc/client.rs
+
 use crate::config::AppConfig;
 use anyhow::Result; 
 use sentiric_contracts::sentiric::sip::v1::registrar_service_client::RegistrarServiceClient;
 use sentiric_contracts::sentiric::sip::v1::b2bua_service_client::B2buaServiceClient;
 use sentiric_contracts::sentiric::dialplan::v1::dialplan_service_client::DialplanServiceClient;
+use sentiric_contracts::sentiric::user::v1::user_service_client::UserServiceClient; // Eklendi
 
 use tonic::transport::{Channel, ClientTlsConfig, Certificate, Identity, Endpoint};
 use tracing::{info, warn};
@@ -13,13 +15,13 @@ pub struct InternalClients {
     pub registrar: RegistrarServiceClient<Channel>,
     pub b2bua: B2buaServiceClient<Channel>,
     pub dialplan: DialplanServiceClient<Channel>,
+    pub user: UserServiceClient<Channel>, // Eklendi
 }
 
 impl InternalClients {
     pub async fn connect(config: &AppConfig) -> Result<Self> {
         info!("🔌 İç servislere bağlanılıyor (mTLS + Lazy Connect)...");
 
-        // TLS Config'i bir kere oluştur
         let tls_config = if !config.ca_path.is_empty() {
             match load_tls_config(config).await {
                 Ok(cfg) => Some(cfg),
@@ -32,10 +34,11 @@ impl InternalClients {
             None
         };
 
-        // [ARCH-COMPLIANCE] SNI isimleri sertifikalarla (services.txt) birebir eşleşecek şekilde düzeltildi.
+        // SNI Adları Sertifikalarla Tam Uyumlu!
         let registrar_channel = connect_endpoint(&config.registrar_grpc_url, "sip-registrar-service", &tls_config).await?;
         let b2bua_channel = connect_endpoint(&config.b2bua_grpc_url, "sip-b2bua-service", &tls_config).await?;
         let dialplan_channel = connect_endpoint(&config.dialplan_grpc_url, "dialplan-service", &tls_config).await?;
+        let user_channel = connect_endpoint(&config.user_service_grpc_url, "user-service", &tls_config).await?;
 
         info!("✅ Tüm dış gRPC istemcileri yapılandırıldı (Lazy Mode).");
 
@@ -43,6 +46,7 @@ impl InternalClients {
             registrar: RegistrarServiceClient::new(registrar_channel),
             b2bua: B2buaServiceClient::new(b2bua_channel),
             dialplan: DialplanServiceClient::new(dialplan_channel),
+            user: UserServiceClient::new(user_channel),
         })
     }
 }
@@ -62,13 +66,10 @@ async fn connect_endpoint(url: &str, server_name: &str, tls_config: &Option<Clie
     let mut endpoint = Endpoint::from_shared(target_url)?;
 
     if let Some(tls) = tls_config {
-        // SNI (Server Name Indication) Override
         let tls_with_sni = tls.clone().domain_name(server_name);
         endpoint = endpoint.tls_config(tls_with_sni)?;
     }
 
-    // [KRİTİK MİMARİ DEĞİŞİKLİK]: connect().await YERİNE connect_lazy()
-    // Servis anında ayağa kalkar. Gerçek TCP/mTLS bağlantısı ilk çağrıda (INVITE gelince) kurulur.
     Ok(endpoint.connect_lazy())
 }
 

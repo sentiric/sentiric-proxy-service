@@ -1,4 +1,5 @@
 // Dosya: sentiric-sip-proxy-service/src/sip/engine.rs
+
 use crate::config::AppConfig;
 use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
 use crate::sip::handlers::routing::{RoutingHandler, RedisConn};
@@ -15,7 +16,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{error, info, debug, instrument, warn};
 use dashmap::DashMap;
-use std::str::FromStr;
+
+//[KRİTİK DÜZELTME]: Eksik olan Trait Import eklendi (E0599 ve E0282 hatasını çözer)
 use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
 
 pub type TransactionStore = Arc<DashMap<String, SipTransaction>>;
@@ -96,7 +98,7 @@ impl ProxyEngine {
     }
 
     async fn handle_request(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // [MİMARİ DÜZELTME]: REGISTER Paketleri gRPC ile Registrar'a iletilir ve döngü (Loop) kırılır.
+        //[MİMARİ DÜZELTME]: REGISTER Paketleri burada doğrudan çözülür
         if packet.method == Method::Register {
             return self.handle_register(packet, src_addr).await;
         }
@@ -131,7 +133,7 @@ impl ProxyEngine {
         );
 
         if !call_id.is_empty() {
-             if let Ok(meta_val) = tonic::metadata::MetadataValue::from_str(&call_id) {
+             if let Ok(meta_val) = tonic::metadata::MetadataValue::try_from(call_id.as_str()) {
                  request.metadata_mut().insert("x-trace-id", meta_val);
              }
         }
@@ -182,12 +184,11 @@ impl ProxyEngine {
         }
     }
 
-    // [MİMARİ DÜZELTME]: Akıllı Register Yönlendirmesi
+    // Akıllı Register Yönlendirmesi ve Kimlik Doğrulama
     async fn handle_register(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         let to_uri = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
         let clean_to_uri = sip_core_utils::extract_aor(&to_uri);
-        
         let contact_header = packet.get_header_value(HeaderName::Contact).cloned().unwrap_or_default();
         
         let mut expires = 3600;
@@ -199,7 +200,7 @@ impl ProxyEngine {
             expires = sub[..end_idx].parse().unwrap_or(3600);
         }
 
-        // [MİMARİ DÜZELTME]: Symmetric Latching - NAT arkasındaki cihazların IP'lerini SBC'den gelen gerçek IP ile değiştir.
+        // Symmetric Latching
         let mut actual_contact_uri = contact_header.clone();
         if let Some(via) = packet.get_header_value(HeaderName::Via) {
             if via.contains("received=") || via.contains("rport=") {
@@ -207,21 +208,70 @@ impl ProxyEngine {
                 let mut port = 5060;
                 for param in via.split(';') {
                     let p_trim = param.trim();
-                    if p_trim.starts_with("received=") {
-                        ip = p_trim[9..].to_string();
-                    } else if p_trim.starts_with("rport=") {
-                        if let Ok(p) = p_trim[6..].parse::<u16>() { port = p; }
-                    }
+                    if p_trim.starts_with("received=") { ip = p_trim[9..].to_string(); } 
+                    else if p_trim.starts_with("rport=") { if let Ok(p) = p_trim[6..].parse::<u16>() { port = p; } }
                 }
                 if !ip.is_empty() {
                     let username = sip_core_utils::extract_username_from_uri(&contact_header);
                     actual_contact_uri = format!("<sip:{}@{}:{}>", username, ip, port);
-                    info!(event="SIP_NAT_CONTACT_FIX", sip.call_id=%call_id, old_contact=%contact_header, new_contact=%actual_contact_uri, "NAT arkası cihazın Contact adresi düzeltildi.");
                 }
             }
         }
 
-        info!(event="SIP_REGISTER_ATTEMPT", sip.call_id=%call_id, sip.uri=%clean_to_uri, "Kayıt (REGISTER) isteği alındı, Registrar servisine gRPC ile iletiliyor.");
+        // ==========================================
+        // 🛡️ SIP DIGEST AUTHENTICATION (401 CHALLENGE)
+        // ==========================================
+        let auth_header = packet.get_header_value(HeaderName::Other("Authorization".to_string()));
+        let mut is_authenticated = false;
+        
+        if let Some(auth_val) = auth_header {
+            if let Some(digest) = crate::sip::auth::DigestAuth::parse(auth_val) {
+                
+                let clients_guard = self.routing_logic.clients.lock().await;
+                if let Some(clients) = clients_guard.as_ref() {
+                    let mut user_client = clients.user.clone();
+                    drop(clients_guard);
+
+                    let mut req = tonic::Request::new(sentiric_contracts::sentiric::user::v1::GetSipCredentialsRequest {
+                        sip_username: digest.username.clone(),
+                        realm: digest.realm.clone(),
+                    });
+                    if !call_id.is_empty() {
+                        if let Ok(meta_val) = tonic::metadata::MetadataValue::try_from(call_id.as_str()) {
+                            req.metadata_mut().insert("x-trace-id", meta_val);
+                        }
+                    }
+
+                    match user_client.get_sip_credentials(req).await {
+                        Ok(res) => {
+                            let ha1 = res.into_inner().ha1_hash;
+                            if digest.verify(&ha1, "REGISTER") {
+                                is_authenticated = true;
+                                info!(event="SIP_AUTH_SUCCESS", sip.call_id=%call_id, user=%digest.username, "✅ SIP Digest doğrulaması başarılı.");
+                            } else {
+                                warn!(event="SIP_AUTH_FAIL", sip.call_id=%call_id, user=%digest.username, "❌ SIP Digest doğrulaması BAŞARISIZ (Yanlış şifre).");
+                            }
+                        }
+                        Err(e) => warn!(event="SIP_AUTH_USER_FAIL", sip.call_id=%call_id, user=%digest.username, error=%e, "❌ Kullanıcı veritabanında bulunamadı."),
+                    }
+                }
+            }
+        }
+
+        // Eğer Auth yoksa veya başarısızsa 401 Challenge gönder
+        if !is_authenticated {
+            let nonce = uuid::Uuid::new_v4().to_string().replace("-", "");
+            let mut resp = SipResponseFactory::create_error(packet, 401, "Unauthorized");
+            let www_auth = format!("Digest realm=\"{}\", nonce=\"{}\", algorithm=MD5", self.config.sip_realm, nonce);
+            resp.headers.push(Header::new(HeaderName::Other("WWW-Authenticate".to_string()), www_auth));
+            
+            info!(event="SIP_AUTH_CHALLENGE", sip.call_id=%call_id, "🔒 401 Unauthorized gönderiliyor (Challenge).");
+            return Some((resp, Some(src_addr)));
+        }
+
+        // ==========================================
+        // 🟢 AUTH BAŞARILI -> REGISTRAR'A KAYDET
+        // ==========================================
 
         let clients_guard = self.routing_logic.clients.lock().await;
         if let Some(clients) = clients_guard.as_ref() {
@@ -242,7 +292,7 @@ impl ProxyEngine {
 
             match reg_client.register(req).await {
                 Ok(_) => {
-                    info!(event="SIP_REGISTER_SUCCESS", sip.call_id=%call_id, sip.uri=%clean_to_uri, "✅ Kullanıcı başarıyla kaydedildi.");
+                    info!(event="SIP_REGISTER_SUCCESS", sip.call_id=%call_id, sip.uri=%clean_to_uri, "✅ Kullanıcı Registrar'a kaydedildi.");
                     let mut ok_resp = SipResponseFactory::create_200_ok(packet);
                     
                     ok_resp.headers.push(Header::new(HeaderName::Contact, actual_contact_uri));
@@ -253,14 +303,12 @@ impl ProxyEngine {
                     return Some((ok_resp, Some(src_addr)));
                 }
                 Err(e) => {
-                    warn!(event="SIP_REGISTER_FAIL", sip.call_id=%call_id, error=%e, "❌ Kayıt reddedildi.");
+                    warn!(event="SIP_REGISTER_FAIL", sip.call_id=%call_id, error=%e, "❌ Registrar reddetti.");
                     return Some((SipResponseFactory::create_error(packet, 403, "Forbidden"), Some(src_addr)));
                 }
             }
-        } else {
-            error!(event="SIP_REGISTER_ERROR", sip.call_id=%call_id, "Registrar Client bulunamadı!");
-            return Some((SipResponseFactory::create_error(packet, 500, "Internal Server Error"), Some(src_addr)));
         }
+        None
     }
 
     async fn handle_response(&self, packet: &mut SipPacket) -> Option<(SipPacket, Option<SocketAddr>)> {

@@ -1,4 +1,4 @@
-// Dosya: src/config.rs
+// Dosya: sentiric-sip-proxy-service/src/config.rs
 
 use anyhow::{Context, Result};
 use std::env;
@@ -17,6 +17,7 @@ pub struct AppConfig {
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
     pub dialplan_grpc_url: String,
+    pub user_service_grpc_url: String, // YENİ EKLENDİ
     
     pub b2bua_sip_addr: String,
     pub registrar_sip_addr: String,
@@ -27,15 +28,15 @@ pub struct AppConfig {
     pub rust_log: String,
     pub log_format: String,
     pub service_version: String,
-    pub node_hostname: String, // YENİ
+    pub node_hostname: String,
+
+    pub sip_realm: String, // YENİ EKLENDİ (Digest Auth İçin)
 
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
 }
 
-
-// [ARCH-COMPLIANCE] Çevresel değişken ön ekleri SIP_PROXY_SERVICE olarak düzeltildi.
 impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
         let grpc_port = env::var("SIP_PROXY_SERVICE_GRPC_PORT").unwrap_or_else(|_| "13071".to_string());
@@ -63,6 +64,7 @@ impl AppConfig {
             registrar_grpc_url: env::var("REGISTRAR_SERVICE_TARGET_GRPC_URL").unwrap_or_default(),
             b2bua_grpc_url: env::var("B2BUA_SERVICE_TARGET_GRPC_URL").unwrap_or_default(),
             dialplan_grpc_url: env::var("DIALPLAN_SERVICE_TARGET_GRPC_URL").unwrap_or_default(),
+            user_service_grpc_url: env::var("USER_SERVICE_TARGET_GRPC_URL").unwrap_or_else(|_| "https://user-service:12011".to_string()),
             redis_url: env::var("REDIS_URL").context("REDIS_URL eksik")?,
             b2bua_sip_addr: env::var("B2BUA_SERVICE_SIP_TARGET").context("B2BUA_SERVICE_SIP_TARGET eksik")?,
             registrar_sip_addr: env::var("REGISTRAR_SERVICE_SIP_TARGET").unwrap_or_else(|_| "sip-proxy-service:13074".to_string()),
@@ -71,8 +73,10 @@ impl AppConfig {
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "json".to_string()),
-            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.5.7".to_string()),
+            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.5.8".to_string()),
             node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()), 
+            
+            sip_realm: env::var("SIP_SIGNALING_SERVICE_REALM").unwrap_or_else(|_| "sentiric_demo".to_string()),
 
             cert_path: env::var("SIP_PROXY_SERVICE_CERT_PATH").context("CERT PATH eksik")?,
             key_path: env::var("SIP_PROXY_SERVICE_KEY_PATH").context("KEY PATH eksik")?,
