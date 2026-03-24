@@ -2,7 +2,7 @@
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use std::net::SocketAddr;
-use tracing::{debug, warn}; // unused debug uyarısı giderildi, kullanılıyor.
+use tracing::{debug, warn}; 
 
 pub type RedisConn = ConnectionManager;
 
@@ -37,7 +37,6 @@ impl RoutingHandler {
     }
 
     pub async fn get_client_source(&self, call_id: &str) -> Option<SocketAddr> {
-        //[DÜZELTME]: Tutarlılık için `caller` kullanılıyor.
         let client_key = format!("proxy:route:{}:caller", call_id);
         let mut conn = self.redis.clone();
         
@@ -71,8 +70,8 @@ impl RoutingHandler {
 
         if let (Some(c_er), Some(c_ee)) = (caller_addr, callee_addr) {
             debug!(event="P2P_ROUTE_LOOKUP", sip.call_id=%call_id, src=%real_src_addr, caller=%c_er, callee=%c_ee, "Redis çift yönlü eşleşme yapılıyor");
-            // İstek "Aranan (Callee)" taraftan geldiyse "Arayan (Caller)" tarafına gönder. Aksi halde tam tersi.
-            if real_src_addr.ip() == c_ee.ip() {
+            // [CRITICAL FIX]: Tam eşleşme (IP + Port) kontrolü ile yön sapmasını engelle.
+            if real_src_addr == c_ee {
                 return Some(c_er);
             } else {
                 return Some(c_ee);
