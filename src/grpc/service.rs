@@ -59,8 +59,8 @@ impl ProxyService for MyProxyService {
         }
         
         // 2. In-Dialog İstekler (ACK, BYE - Direkt Rota)
-        //[ARCH-COMPLIANCE]: B2BUA Dayatması (Bug) kaldırıldı. P2P çağrılar Dialplan'a takılmadan yönlendirilmesi için 
-        // zaten Engine seviyesinde yakalanmaktadır. Burası sadece Fallback olarak kalacak.
+        //[ARCH-COMPLIANCE]: P2P iletişimlerinde hedef direkt olarak muhatap IP'sidir. 
+        // B2BUA zorlaması (Hardcoding) kaldırılarak ağ döngüsü (loop) engellendi.
         if req.is_in_dialog && req.method != "CANCEL" {
             let target_uri = req.destination_uri.replace('<', "").replace('>', "");
             return Ok(Response::new(GetNextHopResponse { uri: target_uri, gateway_id: "direct-route-in-dialog".to_string() }));
