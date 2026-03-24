@@ -1,7 +1,8 @@
 // Dosya: sentiric-sip-proxy-service/src/sip/engine.rs
 
 use crate::config::AppConfig;
-use crate::sip::server::{ProxyState, DEFAULT_SIP_PORT};
+// [DÜZELTME]: DEFAULT_SIP_PORT importu silindi. Aşağıda tam yoluyla (crate::sip::server::DEFAULT_SIP_PORT) kullanılıyor.
+use crate::sip::server::ProxyState; 
 use crate::sip::handlers::routing::{RoutingHandler, RedisConn};
 use crate::grpc::service::MyProxyService;
 
@@ -9,7 +10,7 @@ use sentiric_sip_core::{
     Header, HeaderName, Method, SipPacket,
     SipRouter,
     TransactionEngine, TransactionAction, SipTransaction,
-    utils as sip_core_utils,
+    utils as sip_utils, 
     builder::SipResponseFactory
 };
 use std::net::SocketAddr;
@@ -62,8 +63,6 @@ impl ProxyEngine {
                 return Some((SipResponseFactory::create_error(packet, 483, "Too Many Hops"), Some(src_addr)));
             }
 
-            //[MİMARİ DÜZELTME]: İşlem anahtarına (Transaction Key) 'branch' eklendi.
-            // Bu sayede aynı çağrıdaki şifresiz ve şifreli (Auth) paketler ayrı işlemler olarak tanınır.
             if packet.method != Method::Ack {
                 let branch = packet.get_header_value(HeaderName::Via)
                     .and_then(|v| v.split("branch=").nth(1))
@@ -95,10 +94,8 @@ impl ProxyEngine {
                             }
                         });
 
-                        // İsteği işle ve dönen yanıtı yakala
                         let response_tuple = self.handle_request(packet, src_addr).await;
                         
-                        //[MİMARİ DÜZELTME]: Dönen yanıtı (Örn: 401 veya 200) State'e (Transaction) kaydet.
                         if let Some((ref resp_packet, _)) = response_tuple {
                             if let Some(mut tx) = self.transactions.get_mut(&tx_key) {
                                 tx.update_with_response(resp_packet);
@@ -117,7 +114,6 @@ impl ProxyEngine {
     }
 
     async fn handle_request(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
-        //[MİMARİ DÜZELTME]: REGISTER Paketleri burada doğrudan çözülür
         if packet.method == Method::Register {
             return self.handle_register(packet, src_addr).await;
         }
@@ -172,7 +168,10 @@ impl ProxyEngine {
                     "🗺️ Yönlendirme kararı verildi"
                 );
 
-                let target_addr = if let Some(extracted_socket) = sip_core_utils::extract_socket_addr(&next_hop_uri) {
+                let target_addr = if gateway_id == "internal-p2p" || gateway_id == "direct-route-in-dialog" {
+                    packet.uri = next_hop_uri.replace("<", "").replace(">", "");
+                    Some(src_addr) 
+                } else if let Some(extracted_socket) = sip_utils::extract_socket_addr(&next_hop_uri) {
                     Some(extracted_socket)
                 } else {
                     match self.state.resolve_addr(&next_hop_uri).await {
@@ -203,11 +202,10 @@ impl ProxyEngine {
         }
     }
 
-    // Akıllı Register Yönlendirmesi ve Kimlik Doğrulama
     async fn handle_register(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         let to_uri = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
-        let clean_to_uri = sip_core_utils::extract_aor(&to_uri);
+        let clean_to_uri = sip_utils::extract_aor(&to_uri); 
         let contact_header = packet.get_header_value(HeaderName::Contact).cloned().unwrap_or_default();
         
         let mut expires = 3600;
@@ -219,7 +217,6 @@ impl ProxyEngine {
             expires = sub[..end_idx].parse().unwrap_or(3600);
         }
 
-        // Symmetric Latching
         let mut actual_contact_uri = contact_header.clone();
         if let Some(via) = packet.get_header_value(HeaderName::Via) {
             if via.contains("received=") || via.contains("rport=") {
@@ -231,15 +228,12 @@ impl ProxyEngine {
                     else if p_trim.starts_with("rport=") { if let Ok(p) = p_trim[6..].parse::<u16>() { port = p; } }
                 }
                 if !ip.is_empty() {
-                    let username = sip_core_utils::extract_username_from_uri(&contact_header);
+                    let username = sip_utils::extract_username_from_uri(&contact_header); 
                     actual_contact_uri = format!("<sip:{}@{}:{}>", username, ip, port);
                 }
             }
         }
 
-        // ==========================================
-        // 🛡️ SIP DIGEST AUTHENTICATION (401 CHALLENGE)
-        // ==========================================
         let auth_header = packet.get_header_value(HeaderName::Other("Authorization".to_string()));
         let mut is_authenticated = false;
         
@@ -277,7 +271,6 @@ impl ProxyEngine {
             }
         }
 
-        // Eğer Auth yoksa veya başarısızsa 401 Challenge gönder
         if !is_authenticated {
             let nonce = uuid::Uuid::new_v4().to_string().replace("-", "");
             let mut resp = SipResponseFactory::create_error(packet, 401, "Unauthorized");
@@ -287,10 +280,6 @@ impl ProxyEngine {
             info!(event="SIP_AUTH_CHALLENGE", sip.call_id=%call_id, "🔒 401 Unauthorized gönderiliyor (Challenge).");
             return Some((resp, Some(src_addr)));
         }
-
-        // ==========================================
-        // 🟢 AUTH BAŞARILI -> REGISTRAR'A KAYDET
-        // ==========================================
 
         let clients_guard = self.routing_logic.clients.lock().await;
         if let Some(clients) = clients_guard.as_ref() {
@@ -346,7 +335,8 @@ impl ProxyEngine {
         }
 
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
-            if let Some(target) = SipRouter::resolve_response_target(&next_via.value, DEFAULT_SIP_PORT) {
+            // [DÜZELTME]: DEFAULT_SIP_PORT uzun yoluyla kullanılıyor, import gerektirmez.
+            if let Some(target) = SipRouter::resolve_response_target(&next_via.value, crate::sip::server::DEFAULT_SIP_PORT) {
                 debug!(
                     event = "SIP_RESPONSE_ROUTED",
                     sip.call_id = %call_id,
