@@ -1,8 +1,8 @@
-// src/sip/handlers/routing.rs
+// Dosya: sentiric-sip-proxy-service/src/sip/handlers/routing.rs
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use std::net::SocketAddr;
-use tracing::{debug, warn};
+use tracing::{debug, warn}; // unused debug uyarısı giderildi, kullanılıyor.
 
 pub type RedisConn = ConnectionManager;
 
@@ -23,29 +23,24 @@ impl RoutingHandler {
         };
 
         let mut conn = self.redis.clone();
-        
-        // [DÜZELTME]: Açık tip bildirimi yapıldı (E0282 Hatasını çözer)
         let result: redis::RedisResult<String> = conn.get(&target_key).await;
         
         match result {
             Ok(target_str) => {
                 if let Ok(addr) = target_str.parse::<SocketAddr>() {
-                    debug!("➡️ [ROUTING] Redis hedef bulundu: {} -> {}", target_key, addr);
                     return Some(addr);
                 }
             },
-            Err(_) => {
-                warn!("⚠️[ROUTING] Redis anahtarı bulunamadı: {}", target_key);
-            }
+            Err(_) => { warn!("⚠️[ROUTING] Redis anahtarı bulunamadı: {}", target_key); }
         }
         None
     }
 
     pub async fn get_client_source(&self, call_id: &str) -> Option<SocketAddr> {
-        let client_key = format!("proxy:route:{}:client", call_id);
+        //[DÜZELTME]: Tutarlılık için `caller` kullanılıyor.
+        let client_key = format!("proxy:route:{}:caller", call_id);
         let mut conn = self.redis.clone();
         
-        //[DÜZELTME]: Açık tip bildirimi yapıldı
         let result: redis::RedisResult<String> = conn.get(&client_key).await;
         if let Ok(target_str) = result {
             return target_str.parse::<SocketAddr>().ok();
@@ -54,28 +49,36 @@ impl RoutingHandler {
     }
 
     pub async fn register_call_route(&self, call_id: &str, src_addr: SocketAddr, target_addr: SocketAddr) {
-        let client_key = format!("proxy:route:{}:client", call_id);
-        let target_key = format!("proxy:route:{}:callee", call_id);
+        let caller_key = format!("proxy:route:{}:caller", call_id);
+        let callee_key = format!("proxy:route:{}:callee", call_id);
 
         let mut conn = self.redis.clone();
-        
-        // [DÜZELTME]: unwrap_or_default() yerine RedisResult ile sessiz atama yapıldı
-        let _: redis::RedisResult<()> = conn.set_ex(&client_key, src_addr.to_string(), 300).await;
-        let _: redis::RedisResult<()> = conn.set_ex(&target_key, target_addr.to_string(), 300).await;
+        let _: redis::RedisResult<()> = conn.set_ex(&caller_key, src_addr.to_string(), 3600).await;
+        let _: redis::RedisResult<()> = conn.set_ex(&callee_key, target_addr.to_string(), 3600).await;
     }
 
-    pub async fn update_dialog_state(&self, call_id: &str, to_tag: &str) {
-        if to_tag.is_empty() { return; }
-
-        let old_key = format!("proxy:route:{}:callee", call_id);
-        let new_key = format!("proxy:route:{}:{}", call_id, to_tag);
-        
+    // [YENİ] In-Dialog İki Yönlü P2P Rota Çözücü
+    pub async fn resolve_in_dialog_target(&self, call_id: &str, real_src_addr: SocketAddr) -> Option<SocketAddr> {
+        let caller_key = format!("proxy:route:{}:caller", call_id);
+        let callee_key = format!("proxy:route:{}:callee", call_id);
         let mut conn = self.redis.clone();
         
-        // [DÜZELTME]: Açık tip bildirimi yapıldı
-        let _: redis::RedisResult<()> = conn.rename(&old_key, &new_key).await;
-        let _: redis::RedisResult<()> = conn.expire(&new_key, 3600).await;
+        let caller_str: redis::RedisResult<String> = conn.get(&caller_key).await;
+        let callee_str: redis::RedisResult<String> = conn.get(&callee_key).await;
         
-        debug!("💾 [ROUTING] Dialog Tag Güncellendi: {} -> {}", call_id, to_tag);
+        let caller_addr = caller_str.ok().and_then(|s| s.parse::<SocketAddr>().ok());
+        let callee_addr = callee_str.ok().and_then(|s| s.parse::<SocketAddr>().ok());
+
+        if let (Some(c_er), Some(c_ee)) = (caller_addr, callee_addr) {
+            debug!(event="P2P_ROUTE_LOOKUP", sip.call_id=%call_id, src=%real_src_addr, caller=%c_er, callee=%c_ee, "Redis çift yönlü eşleşme yapılıyor");
+            // İstek "Aranan (Callee)" taraftan geldiyse "Arayan (Caller)" tarafına gönder. Aksi halde tam tersi.
+            if real_src_addr.ip() == c_ee.ip() {
+                return Some(c_er);
+            } else {
+                return Some(c_ee);
+            }
+        }
+        
+        callee_addr
     }
 }

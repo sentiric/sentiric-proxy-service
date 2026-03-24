@@ -121,6 +121,27 @@ impl ProxyEngine {
         let in_dialog = packet.is_in_dialog_request();
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
+        //[ARCH-COMPLIANCE]: IN-DIALOG STATEFUL ROUTING (P2P ve B2BUA İçin Ortak Çözüm)
+        if in_dialog && packet.method != Method::Cancel {
+            // Asıl hedefin IP'sini bulmak için SBC'nin Via'sından gerçek kaynağı çıkarıyoruz.
+            let real_src_ip = packet.get_header_value(HeaderName::Via)
+                .and_then(|v| SipRouter::resolve_response_target(v, 5060))
+                .unwrap_or(src_addr);
+                
+            if let Some(real_peer) = self._router.resolve_in_dialog_target(&call_id, real_src_ip).await {
+                info!(event="SIP_INBOUND_IN_DIALOG", sip.call_id=%call_id, target=%real_peer, "In-Dialog İstek Redis rotasıyla stateful yönlendiriliyor");
+                
+                let dest_user = sip_utils::extract_username_from_uri(&dest_uri);
+                packet.uri = format!("sip:{}@{}:{}", dest_user, real_peer.ip(), real_peer.port());
+                
+                SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
+                
+                // [DÜZELTME]: Hata veren lookup_host silindi. Paketi bize gönderen zaten SBC'dir.
+                // P2P paketini dış dünyaya ulaştırması için onu bize getiren kaynağa (SBC'ye) iade ediyoruz.
+                return Some((packet.clone(), Some(src_addr)));
+            }
+        }
+
         let mut request = tonic::Request::new(
             sentiric_contracts::sentiric::sip::v1::GetNextHopRequest {
                 destination_uri: dest_uri.clone(),
@@ -152,11 +173,10 @@ impl ProxyEngine {
                     "🗺️ Yönlendirme kararı verildi"
                 );
 
-                // [ARCH-COMPLIANCE]: P2P iletişimlerinde hedef direkt olarak muhatap IP'sidir. 
-                // SBC'ye (src_addr) dönülmesi gerekir ki o da asıl UAC'ye ulaştırsın.
                 let target_addr = if gateway_id == "internal-p2p" || gateway_id == "direct-route-in-dialog" {
                     packet.uri = next_hop_uri.replace("<", "").replace(">", "");
-                    Some(src_addr) 
+                    // P2P için Proxy hedefi SBC'dir. SBC paketi dış dünyaya basar.
+                    self._router.get_client_source(&call_id).await.or(Some(src_addr))
                 } else if let Some(extracted_socket) = sip_utils::extract_socket_addr(&next_hop_uri) {
                     Some(extracted_socket)
                 } else {
@@ -170,6 +190,14 @@ impl ProxyEngine {
                 };
 
                 if let Some(target) = target_addr {
+                    // Kaynak ve hedefi Redis'e yaz (ACK/BYE için state tutulur)
+                    let real_src = packet.get_header_value(HeaderName::Via)
+                        .and_then(|v| SipRouter::resolve_response_target(v, 5060))
+                        .unwrap_or(src_addr);
+                    let real_dst = sip_utils::extract_socket_addr(&next_hop_uri).unwrap_or(target);
+                    
+                    self._router.register_call_route(&call_id, real_src, real_dst).await;
+
                     if packet.method == Method::Invite {
                         SipRouter::add_record_route(packet, &self.config.public_ip, 5060);
                     }
@@ -187,7 +215,6 @@ impl ProxyEngine {
     }
 
     async fn handle_register(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
-        // Register kodu aynı kalıyor... (Kısaltıldı)
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         let to_uri = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
         let clean_to_uri = sip_utils::extract_aor(&to_uri); 
