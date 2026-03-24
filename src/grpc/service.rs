@@ -59,16 +59,13 @@ impl ProxyService for MyProxyService {
         }
         
         // 2. In-Dialog İstekler (ACK, BYE - Direkt Rota)
+        //[ARCH-COMPLIANCE]: B2BUA Dayatması (Bug) kaldırıldı. P2P çağrılar Dialplan'a takılmadan yönlendirilmesi için 
+        // zaten Engine seviyesinde yakalanmaktadır. Burası sadece Fallback olarak kalacak.
         if req.is_in_dialog && req.method != "CANCEL" {
-            let mut target_uri = req.destination_uri.replace('<', "").replace('>', "");
-            if target_uri.contains(&self.config.public_ip) {
-                target_uri = self.config.b2bua_sip_addr.clone();
-            }
+            let target_uri = req.destination_uri.replace('<', "").replace('>', "");
             return Ok(Response::new(GetNextHopResponse { uri: target_uri, gateway_id: "direct-route-in-dialog".to_string() }));
         }
 
-        // [ARCH-COMPLIANCE] "REGISTER" yönlendirmesi silindi, çünkü artık UDP olarak yönlendirilmeyecek. Motor bizzat çözecek.
-        
         // 3. Cache Kontrolü
         let cache_key = format!("{}:{}", caller_id, destination_user);
         if let Some(cached) = self.cache.get(&cache_key) {
@@ -78,10 +75,10 @@ impl ProxyService for MyProxyService {
             }
         }
 
-        // 4. [SMART RETRY ENGINE] Dialplan Sorgusu
+        // 4. Dialplan Sorgusu
         let clients_guard = self.clients.lock().await;
         let clients_ref = clients_guard.as_ref().ok_or_else(|| Status::unavailable("Proxy starting..."))?;
-        let mut dialplan_client = clients_ref.dialplan.clone(); // Lock'ı hızlı bırakmak için clone'la
+        let mut dialplan_client = clients_ref.dialplan.clone(); 
         drop(clients_guard);
 
         let max_retries = 3;
@@ -92,7 +89,6 @@ impl ProxyService for MyProxyService {
             attempt += 1;
             let start = Instant::now();
             
-            // Request her döngüde yeniden oluşturulmalı çünkü consume ediliyor
             let mut dp_req = Request::new(ResolveDialplanRequest {
                 caller_contact_value: caller_id.clone(),
                 destination_number: destination_user.clone(),

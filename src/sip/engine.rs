@@ -1,7 +1,5 @@
 // Dosya: sentiric-sip-proxy-service/src/sip/engine.rs
-
 use crate::config::AppConfig;
-// [DÜZELTME]: DEFAULT_SIP_PORT importu silindi. Aşağıda tam yoluyla (crate::sip::server::DEFAULT_SIP_PORT) kullanılıyor.
 use crate::sip::server::ProxyState; 
 use crate::sip::handlers::routing::{RoutingHandler, RedisConn};
 use crate::grpc::service::MyProxyService;
@@ -129,11 +127,23 @@ impl ProxyEngine {
             false
         };
 
-        if in_dialog && packet.method != Method::Cancel && is_from_b2bua {
-            if let Some(sbc_addr) = self._router.get_client_source(&call_id).await {
-                info!(event="SIP_OUTBOUND_IN_DIALOG", sip.call_id=%call_id, target=%sbc_addr, "Yönlendirme SBC üzerinden dışarı yapılıyor");
-                SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
-                return Some((packet.clone(), Some(sbc_addr)));
+        //[ARCH-COMPLIANCE]: IN-DIALOG STATEFUL ROUTING
+        if in_dialog && packet.method != Method::Cancel {
+            if is_from_b2bua {
+                // B2BUA -> UAC akışı
+                if let Some(sbc_addr) = self._router.get_client_source(&call_id).await {
+                    info!(event="SIP_OUTBOUND_IN_DIALOG", sip.call_id=%call_id, target=%sbc_addr, "Yönlendirme B2BUA'dan SBC üzerinden dışarı yapılıyor");
+                    SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
+                    return Some((packet.clone(), Some(sbc_addr)));
+                }
+            } else {
+                // UAC -> Hedef (P2P veya B2BUA)
+                // Redis'e 'proxy:route:{call_id}:callee' olarak kaydettiğimiz orijinal state hedefini arıyoruz.
+                if let Some(callee_addr) = self._router.resolve_ack_target(&call_id, "").await {
+                    info!(event="SIP_INBOUND_IN_DIALOG", sip.call_id=%call_id, target=%callee_addr, "In-Dialog İstek (P2P) Redis rotasıyla stateful yönlendiriliyor");
+                    SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
+                    return Some((packet.clone(), Some(callee_addr)));
+                }
             }
         }
 
@@ -184,6 +194,7 @@ impl ProxyEngine {
                 };
 
                 if let Some(target) = target_addr {
+                    // Kaynak ve hedefi Redis'e yaz (ACK/BYE için state tutulur)
                     self._router.register_call_route(&call_id, src_addr, target).await;
 
                     if packet.method == Method::Invite {
@@ -203,6 +214,7 @@ impl ProxyEngine {
     }
 
     async fn handle_register(&self, packet: &mut SipPacket, src_addr: SocketAddr) -> Option<(SipPacket, Option<SocketAddr>)> {
+        // Register kodu aynı kalıyor... (Kısaltıldı)
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         let to_uri = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
         let clean_to_uri = sip_utils::extract_aor(&to_uri); 
@@ -335,7 +347,6 @@ impl ProxyEngine {
         }
 
         if let Some(next_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
-            // [DÜZELTME]: DEFAULT_SIP_PORT uzun yoluyla kullanılıyor, import gerektirmez.
             if let Some(target) = SipRouter::resolve_response_target(&next_via.value, crate::sip::server::DEFAULT_SIP_PORT) {
                 debug!(
                     event = "SIP_RESPONSE_ROUTED",

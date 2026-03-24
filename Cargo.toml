@@ -1,7 +1,7 @@
 # Dosya: sentiric-sip-proxy-service/Cargo.toml
 [package]
 name = "sentiric-sip-proxy-service"
-version = "1.6.3"
+version = "1.6.4"
 edition = "2021"
 
 [dependencies]
