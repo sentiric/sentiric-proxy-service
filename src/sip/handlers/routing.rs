@@ -31,7 +31,8 @@ impl RoutingHandler {
                     return Some(addr);
                 }
             },
-            Err(_) => { warn!("⚠️[ROUTING] Redis anahtarı bulunamadı: {}", target_key); }
+            //[ARCH-COMPLIANCE] SUTS v4.0 Loglama kuralı uygulandı
+            Err(_) => { warn!(event="REDIS_KEY_NOT_FOUND", target_key=%target_key, "⚠️[ROUTING] Redis anahtarı bulunamadı: {}", target_key); }
         }
         None
     }
@@ -56,7 +57,7 @@ impl RoutingHandler {
         let _: redis::RedisResult<()> = conn.set_ex(&callee_key, target_addr.to_string(), 3600).await;
     }
 
-    // [YENİ] In-Dialog İki Yönlü P2P Rota Çözücü
+    //[YENİ] In-Dialog İki Yönlü P2P Rota Çözücü
     pub async fn resolve_in_dialog_target(&self, call_id: &str, real_src_addr: SocketAddr) -> Option<SocketAddr> {
         let caller_key = format!("proxy:route:{}:caller", call_id);
         let callee_key = format!("proxy:route:{}:callee", call_id);

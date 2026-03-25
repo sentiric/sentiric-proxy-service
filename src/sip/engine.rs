@@ -158,6 +158,9 @@ impl ProxyEngine {
             }
         );
 
+        //[ARCH-COMPLIANCE] Kesin Timeout ZORUNLULUĞU
+        request.set_timeout(std::time::Duration::from_secs(3));
+
         if !call_id.is_empty() {
              if let Ok(meta_val) = tonic::metadata::MetadataValue::try_from(call_id.as_str()) {
                  request.metadata_mut().insert("x-trace-id", meta_val);
@@ -265,6 +268,10 @@ impl ProxyEngine {
                         sip_username: digest.username.clone(),
                         realm: digest.realm.clone(),
                     });
+
+                    //[ARCH-COMPLIANCE] Kesin Timeout ZORUNLULUĞU
+                    req.set_timeout(std::time::Duration::from_secs(2));
+
                     if !call_id.is_empty() {
                         if let Ok(meta_val) = tonic::metadata::MetadataValue::try_from(call_id.as_str()) {
                             req.metadata_mut().insert("x-trace-id", meta_val);
@@ -307,6 +314,9 @@ impl ProxyEngine {
                 contact_uri: actual_contact_uri.clone(),
                 expires,
             });
+            
+            // [ARCH-COMPLIANCE] Kesin Timeout ZORUNLULUĞU
+            req.set_timeout(std::time::Duration::from_secs(2));
             
             if !call_id.is_empty() {
                 if let Ok(meta_val) = tonic::metadata::MetadataValue::try_from(call_id.as_str()) {

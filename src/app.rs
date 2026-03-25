@@ -140,17 +140,18 @@ impl App {
                 http_shutdown_rx.await.ok();
             });
             info!(event="HTTP_SERVER_START", address=%addr, "HTTP sunucusu aktif.");
-            if let Err(e) = server.await { error!(error=%e, "HTTP sunucusu hatası"); }
+            if let Err(e) = server.await { error!(event="HTTP_SERVER_ERROR", error=%e, "HTTP sunucusu hatası"); }
         });
 
         let ctrl_c = async { tokio::signal::ctrl_c().await.expect("Ctrl+C hatası"); };
         
+        //[ARCH-COMPLIANCE] ARCH-007 Loglama Event Key Zorunluluğu
         tokio::select! {
-            res = grpc_server_handle => { if let Err(e) = res? { error!("gRPC Error: {}", e); } },
-            _res = sip_handle => { error!("SIP Server durdu"); },
-            _res = http_server_handle => { error!("HTTP Server durdu"); },
-            _ = ctrl_c => { warn!(event="SIGINT", "Kapatma sinyali alındı."); },
-            _ = shutdown_rx.recv() => { warn!("Kapatma sinyali."); }
+            res = grpc_server_handle => { if let Err(e) = res? { error!(event="GRPC_SERVER_CRASH", "gRPC Error: {}", e); } },
+            _res = sip_handle => { error!(event="SIP_SERVER_CRASH", "SIP Server durdu"); },
+            _res = http_server_handle => { error!(event="HTTP_SERVER_CRASH", "HTTP Server durdu"); },
+            _ = ctrl_c => { warn!(event="SIGINT_RECEIVED", "Kapatma sinyali alındı."); },
+            _ = shutdown_rx.recv() => { warn!(event="SHUTDOWN_RECV", "Kapatma sinyali."); }
         }
 
         let _ = grpc_stop_tx.send(()).await;

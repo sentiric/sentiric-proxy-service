@@ -93,6 +93,10 @@ impl ProxyService for MyProxyService {
                 caller_contact_value: caller_id.clone(),
                 destination_number: destination_user.clone(),
             });
+
+            // [ARCH-COMPLIANCE] ARCH-004 Kesin Timeout Zorunluluğu
+            dp_req.set_timeout(Duration::from_secs(3));
+
             if trace_id != "unknown" {
                 let _ = dp_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
             }
@@ -143,6 +147,10 @@ impl MyProxyService {
                 drop(clients_guard);
 
                 let mut lookup_req = Request::new(LookupContactRequest { sip_uri: dest_uri.to_string() });
+
+                // [ARCH-COMPLIANCE] ARCH-004 Kesin Timeout Zorunluluğu
+                lookup_req.set_timeout(Duration::from_secs(2));
+
                 if trace_id != "unknown" {
                      let _ = lookup_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
                 }
