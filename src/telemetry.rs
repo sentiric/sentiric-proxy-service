@@ -1,4 +1,4 @@
-// src/telemetry.rs
+// Dosya: src/telemetry.rs
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -11,26 +11,16 @@ use tracing_subscriber::registry::LookupSpan;
 /// SUTS v4.0 Log Record (Proxy Edition)
 #[derive(Serialize)]
 struct SutsLogRecord<'a> {
-    // 1. Governance
     schema_v: &'static str,
     ts: String,
     severity: String,
     tenant_id: String,
-
-    // 2. Resource
     resource: ResourceContext,
-
-    // 3. Tracing
     trace_id: Option<String>,
     span_id: Option<String>,
-
-    // 4. Payload
     event: String,
     message: String,
-
-    // 5. Attributes
     attributes: HashMap<String, Value>,
-
     #[serde(skip)]
     _marker: std::marker::PhantomData<&'a ()>,
 }
@@ -49,10 +39,11 @@ struct ResourceContext {
 
 pub struct SutsFormatter {
     resource: ResourceContext,
+    tenant_id: String, // [ARCH-COMPLIANCE] Dinamik Tenant ID eklendi
 }
 
 impl SutsFormatter {
-    pub fn new(service_name: String, version: String, env: String, host_name: String) -> Self {
+    pub fn new(service_name: String, version: String, env: String, host_name: String, tenant_id: String) -> Self {
         Self {
             resource: ResourceContext {
                 service_name,
@@ -60,6 +51,7 @@ impl SutsFormatter {
                 service_env: env,
                 host_name,
             },
+            tenant_id,
         }
     }
 }
@@ -71,14 +63,13 @@ where
 {
     fn format_event(
         &self,
-        _ctx: &FmtContext<'_, S, N>,
+        ctx: &FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
         let meta = event.metadata();
         let ts = Utc::now().to_rfc3339();
         
-        // Severity Mapping (SUTS Standard)
         let severity = match *meta.level() {
             tracing::Level::ERROR => "ERROR",
             tracing::Level::WARN => "WARN",
@@ -98,8 +89,6 @@ where
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(String::new);
 
-        // --- INTELLIGENCE LOGIC: TRACE ID PROMOTION ---
-        // Proxy için sip.call_id en önemli trace anahtarıdır.
         let trace_id = if let Some(tid) = visitor.fields.get("trace_id").and_then(|v| v.as_str()) {
             Some(tid.to_string())
         } else if let Some(cid) = visitor.fields.get("sip.call_id").and_then(|v| v.as_str()) {
@@ -108,14 +97,20 @@ where
             None
         };
 
+        // [ARCH-COMPLIANCE] Span ID Propagation (OTel Uyumlu)
+        let span_id = ctx
+            .lookup_current()
+            .map(|span| format!("{:016x}", span.id().into_u64()))
+            .or_else(|| Some("no-span".to_string()));
+
         let log_record = SutsLogRecord {
             schema_v: "1.0.0",
             ts,
             severity,
-            tenant_id: "sentiric_demo".to_string(),
+            tenant_id: self.tenant_id.clone(),
             resource: self.resource.clone(),
             trace_id,
-            span_id: None,
+            span_id,
             event: event_name,
             message,
             attributes: visitor.fields,

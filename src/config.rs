@@ -1,5 +1,4 @@
-// Dosya: sentiric-sip-proxy-service/src/config.rs
-
+// Dosya: src/config.rs
 use anyhow::{Context, Result};
 use std::env;
 use std::net::SocketAddr;
@@ -17,7 +16,7 @@ pub struct AppConfig {
     pub registrar_grpc_url: String,
     pub b2bua_grpc_url: String,
     pub dialplan_grpc_url: String,
-    pub user_service_grpc_url: String, // YENİ EKLENDİ
+    pub user_service_grpc_url: String,
     
     pub b2bua_sip_addr: String,
     pub registrar_sip_addr: String,
@@ -30,11 +29,13 @@ pub struct AppConfig {
     pub service_version: String,
     pub node_hostname: String,
 
-    pub sip_realm: String, // YENİ EKLENDİ (Digest Auth İçin)
+    pub sip_realm: String, 
 
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
+    
+    pub tenant_id: String, // [ARCH-COMPLIANCE] Tenant ID runtime'da çözülmek için eklendi
 }
 
 impl AppConfig {
@@ -53,6 +54,14 @@ impl AppConfig {
             .split(',')
             .map(|s| s.trim().to_lowercase())
             .collect();
+
+        // [ARCH-COMPLIANCE] tenant_id zorunlu alan doğrulaması
+        let tenant_id = env::var("TENANT_ID")
+            .map_err(|_| anyhow::anyhow!("[ARCH-COMPLIANCE] TENANT_ID env var zorunludur, tanımlanmamış"))?;
+        
+        if tenant_id.is_empty() {
+            anyhow::bail!("[ARCH-COMPLIANCE] TENANT_ID boş olamaz");
+        }
 
         Ok(AppConfig {
             grpc_listen_addr: grpc_addr,
@@ -81,6 +90,7 @@ impl AppConfig {
             cert_path: env::var("SIP_PROXY_SERVICE_CERT_PATH").context("CERT PATH eksik")?,
             key_path: env::var("SIP_PROXY_SERVICE_KEY_PATH").context("KEY PATH eksik")?,
             ca_path: env::var("GRPC_TLS_CA_PATH").context("CA PATH eksik")?,
+            tenant_id,
         })
     }
 }

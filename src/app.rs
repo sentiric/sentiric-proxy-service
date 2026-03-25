@@ -1,4 +1,4 @@
-// src/app.rs
+// Dosya: src/app.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MyProxyService;
 use crate::grpc::client::InternalClients;
@@ -44,17 +44,17 @@ impl App {
         
         if config.log_format == "json" {
             let suts_formatter = SutsFormatter::new(
-                "sip-proxy-service".to_string(), // [CRITICAL FIX] Log service ismi güncellendi.
+                "sip-proxy-service".to_string(), 
                 config.service_version.clone(),
                 config.env.clone(),
                 config.node_hostname.clone(),
+                config.tenant_id.clone(), //[ARCH-COMPLIANCE] Tenant enjekte edildi
             );
             
             subscriber.with(fmt::layer().event_format(suts_formatter)).init();
         } else {
             subscriber.with(fmt::layer().compact()).init();
         }
-        // -------------------------------
 
         info!(
             event = "SYSTEM_STARTUP",
@@ -111,7 +111,7 @@ impl App {
                 .context("gRPC sunucusu çöktü")
         });
 
-        // 4. Client Manager (Lazy Connect - No Retry Loop Needed)
+        // 4. Client Manager
         let clients_container_clone = clients_container.clone();
         let config_clone = self.config.clone();
         
