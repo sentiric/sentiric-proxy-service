@@ -10,14 +10,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::lookup_host;
-use tokio::sync::mpsc; //[DÜZELTME]: Mutex kaldırıldı.
+use tokio::sync::mpsc; 
 use tracing::{debug, error, info, warn};
 use dashmap::DashMap;
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
 pub struct ProxyState {
-    // Dashmap ile thread-safe DNS Cache: Hostname -> (IP, Son_Güncellenme)
     dns_cache: DashMap<String, (SocketAddr, Instant)>,
 }
 
@@ -29,30 +28,25 @@ impl ProxyState {
     }
 
     pub async fn resolve_addr(&self, hostname: &str) -> Result<SocketAddr> {
-        // Eğer zaten IP adresi ise direkt dön
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Ok(addr);
         }
 
         let now = Instant::now();
         
-        // 1. Önbellekte var mı ve 60 saniyeden yeni mi?
         if let Some(cached) = self.dns_cache.get(hostname) {
             let (addr, timestamp) = *cached;
             if now.duration_since(timestamp) < Duration::from_secs(60) {
-                // Ön bellekten hızlı yanıt (0 ms)
                 return Ok(addr);
             }
         }
 
-        // 2. Yoksa veya süresi dolduysa DNS sorgusu yap
         debug!(event="DNS_RESOLVE_NETWORK", host=%hostname, "DNS ağdan çözümleniyor...");
         let addr = lookup_host(hostname)
             .await?
             .next()
             .ok_or_else(|| anyhow!("DNS kaydı bulunamadı: {}", hostname))?;
         
-        // 3. Sonucu önbelleğe kaydet
         self.dns_cache.insert(hostname.to_string(), (addr, now));
         Ok(addr)
     }
@@ -103,7 +97,6 @@ impl SipServer {
                         Ok((len, src_addr)) => {
                             if len < 4 { continue; }
                             
-                            // Keep-Alive (CRLF) paketlerini yoksay
                             if len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
                                 continue;
                             }
@@ -113,7 +106,13 @@ impl SipServer {
                             match parser::parse(data) {
                                 Ok(mut packet) => {
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
-                                    let method = packet.method.as_str();
+                                    
+                                    // [ARCH-COMPLIANCE] TYPE FIX: status_code is natively u16
+                                    let method = if packet.is_request() { 
+                                        packet.method.as_str().to_string() 
+                                    } else { 
+                                        format!("RESPONSE/{}", packet.status_code) 
+                                    };
                                     
                                     debug!(
                                         event = "SIP_PACKET_RECEIVED",
@@ -126,14 +125,21 @@ impl SipServer {
 
                                     if let Some((resp_packet, target_addr_opt)) = self.engine.process_packet(&mut packet, src_addr).await {
                                         if let Some(dest) = target_addr_opt {
-                                            let resp_method = resp_packet.method.as_str();
+                                            
+                                            //[ARCH-COMPLIANCE] TYPE FIX
+                                            let resp_method = if resp_packet.is_request() { 
+                                                resp_packet.method.as_str().to_string() 
+                                            } else { 
+                                                format!("RESPONSE/{}", resp_packet.status_code) 
+                                            };
+
                                             info!(
                                                 event = "SIP_PACKET_SENT",
                                                 sip.call_id = %call_id,
                                                 sip.method = %resp_method,
                                                 net.dst.ip = %dest.ip(),
                                                 net.dst.port = dest.port(),
-                                                "📤 [PROXY->NEXT] Paket iletiliyor"
+                                                "📤[PROXY->NEXT] Paket iletiliyor"
                                             );
 
                                             let resp_bytes = resp_packet.to_bytes();

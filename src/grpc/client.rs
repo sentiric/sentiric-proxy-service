@@ -1,11 +1,11 @@
 // Dosya: sentiric-sip-proxy-service/src/grpc/client.rs
 
 use crate::config::AppConfig;
-use anyhow::{Context, Result}; 
+use anyhow::Result; // [FIX]: Kullanılmayan "Context" importu silindi
 use sentiric_contracts::sentiric::sip::v1::registrar_service_client::RegistrarServiceClient;
 use sentiric_contracts::sentiric::sip::v1::b2bua_service_client::B2buaServiceClient;
 use sentiric_contracts::sentiric::dialplan::v1::dialplan_service_client::DialplanServiceClient;
-use sentiric_contracts::sentiric::user::v1::user_service_client::UserServiceClient; // Eklendi
+use sentiric_contracts::sentiric::user::v1::user_service_client::UserServiceClient; 
 
 use tonic::transport::{Channel, ClientTlsConfig, Certificate, Identity, Endpoint};
 use tracing::{info, warn, error};
@@ -15,7 +15,7 @@ pub struct InternalClients {
     pub registrar: RegistrarServiceClient<Channel>,
     pub b2bua: B2buaServiceClient<Channel>,
     pub dialplan: DialplanServiceClient<Channel>,
-    pub user: UserServiceClient<Channel>, // Eklendi
+    pub user: UserServiceClient<Channel>, 
 }
 
 impl InternalClients {

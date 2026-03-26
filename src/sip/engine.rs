@@ -120,6 +120,9 @@ impl ProxyEngine {
         let dest_uri = packet.uri.clone();
         let in_dialog = packet.is_in_dialog_request();
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+        
+        //[ARCH-COMPLIANCE] TYPE FIX: unwrap_or(0) kaldırıldı
+        let method = if packet.is_request() { packet.method.as_str().to_string() } else { format!("RESPONSE/{}", packet.status_code) };
 
         //[ARCH-COMPLIANCE]: IN-DIALOG STATEFUL ROUTING (P2P ve B2BUA İçin Ortak Çözüm)
         if in_dialog && packet.method != Method::Cancel {
@@ -176,7 +179,7 @@ impl ProxyEngine {
                 info!(
                     event = "SIP_ROUTE_DECISION",
                     sip.call_id = %call_id,
-                    sip.method = %packet.method.as_str(),
+                    sip.method = %method,
                     route.target = %next_hop_uri,
                     route.gateway = %gateway_id,
                     "🗺️ Yönlendirme kararı verildi"
