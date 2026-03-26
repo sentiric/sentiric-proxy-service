@@ -101,15 +101,40 @@ impl ProxyService for MyProxyService {
                 let _ = dp_req.metadata_mut().insert("x-trace-id", trace_id.parse().unwrap());
             }
 
-            info!(event="GRPC_OUT_ATTEMPT", grpc.target="dialplan-service", grpc.method="ResolveDialplan", attempt=attempt, "📡 Dialplan servisine istek atılıyor...");
+            // [ARCH-COMPLIANCE] sip.call_id loglara eklendi
+            info!(
+                event="GRPC_OUT_ATTEMPT", 
+                sip.call_id=%trace_id, 
+                grpc.target="dialplan-service", 
+                grpc.method="ResolveDialplan", 
+                attempt=attempt, 
+                "📡 Dialplan servisine istek atılıyor..."
+            );
 
             match dialplan_client.resolve_dialplan(dp_req).await {
                 Ok(res) => {
-                    info!(event="GRPC_OUT_SUCCESS", grpc.target="dialplan-service", grpc.method="ResolveDialplan", attempt=attempt, latency_ms=start.elapsed().as_millis(), "✅ Dialplan başarıyla yanıt verdi.");
+                    info!(
+                        event="GRPC_OUT_SUCCESS", 
+                        sip.call_id=%trace_id, 
+                        grpc.target="dialplan-service", 
+                        grpc.method="ResolveDialplan", 
+                        attempt=attempt, 
+                        latency_ms=start.elapsed().as_millis(), 
+                        "✅ Dialplan başarıyla yanıt verdi."
+                    );
                     break Ok(res.into_inner());
                 },
                 Err(e) => {
-                    warn!(event="GRPC_OUT_FAIL", grpc.target="dialplan-service", grpc.method="ResolveDialplan", attempt=attempt, latency_ms=start.elapsed().as_millis(), error=%e, "⚠️ Dialplan çağrısı başarısız.");
+                    warn!(
+                        event="GRPC_OUT_FAIL", 
+                        sip.call_id=%trace_id, 
+                        grpc.target="dialplan-service", 
+                        grpc.method="ResolveDialplan", 
+                        attempt=attempt, 
+                        latency_ms=start.elapsed().as_millis(), 
+                        error=%e, 
+                        "⚠️ Dialplan çağrısı başarısız."
+                    );
                     if attempt >= max_retries {
                         break Err(e);
                     }

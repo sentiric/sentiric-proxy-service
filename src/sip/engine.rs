@@ -142,7 +142,7 @@ impl ProxyEngine {
             };
                 
             if let Some(real_peer) = self._router.resolve_in_dialog_target(&call_id, real_src_ip).await {
-                info!(event="SIP_INBOUND_IN_DIALOG", sip.call_id=%call_id, target=%real_peer, "In-Dialog İstek Redis rotasıyla stateful yönlendiriliyor");
+                debug!(event="SIP_INBOUND_IN_DIALOG", sip.call_id=%call_id, target=%real_peer, "In-Dialog İstek Redis rotasıyla stateful yönlendiriliyor");
                 
                 let dest_user = sip_utils::extract_username_from_uri(&dest_uri);
                 packet.uri = format!("sip:{}@{}:{}", dest_user, real_peer.ip(), real_peer.port());
