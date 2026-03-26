@@ -49,6 +49,12 @@ impl ProxyEngine {
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
         if packet.is_request() {
+            // [ARCH-COMPLIANCE] MİMARİ AĞ DÜZELTMESİ (Kritik)
+            // Konteynerlar arası NAT sınırını asabilmek icin SIP Via basligina gercek 
+            // fiziksel soket adresini kaziyoruz. Bu sayede 200 OK yanıtı kör noktaya degil
+            // tam olarak istegin geldigi Docker pod'una donecektir.
+            SipRouter::fix_nat_via(packet, src_addr);
+
             let is_in_dialog = packet.is_in_dialog_request();
             
             if !is_in_dialog && SipRouter::detect_loop(packet, &self.config.proxy_advertised_host, self.config.sip_port) {
@@ -121,12 +127,9 @@ impl ProxyEngine {
         let in_dialog = packet.is_in_dialog_request();
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         
-        //[ARCH-COMPLIANCE] TYPE FIX: unwrap_or(0) kaldırıldı
         let method = if packet.is_request() { packet.method.as_str().to_string() } else { format!("RESPONSE/{}", packet.status_code) };
 
-        //[ARCH-COMPLIANCE]: IN-DIALOG STATEFUL ROUTING (P2P ve B2BUA İçin Ortak Çözüm)
         if in_dialog && packet.method != Method::Cancel {
-            // [CRITICAL FIX]: SBC kendi Via'sını eklediği için, gerçek kaynağı bulmak için SBC'nin Via'sını atlayıp İKİNCİ Via'ya bakıyoruz.
             let via_count = packet.headers.iter().filter(|h| h.name == HeaderName::Via).count();
             let real_src_ip = if via_count > 1 {
                 packet.headers.iter().filter(|h| h.name == HeaderName::Via).nth(1)
@@ -145,8 +148,6 @@ impl ProxyEngine {
                 packet.uri = format!("sip:{}@{}:{}", dest_user, real_peer.ip(), real_peer.port());
                 
                 SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
-                
-                // P2P paketini dış dünyaya ulaştırması için onu bize getiren kaynağa (SBC'ye) iade ediyoruz.
                 return Some((packet.clone(), Some(src_addr)));
             }
         }
@@ -161,7 +162,6 @@ impl ProxyEngine {
             }
         );
 
-        //[ARCH-COMPLIANCE] Kesin Timeout ZORUNLULUĞU
         request.set_timeout(std::time::Duration::from_secs(3));
 
         if !call_id.is_empty() {
@@ -185,14 +185,12 @@ impl ProxyEngine {
                     "🗺️ Yönlendirme kararı verildi"
                 );
 
-                // [ARCH-COMPLIANCE] Motorun DNS çözümlemesi çağrısı güncellendi
                 let target_addr = if gateway_id == "internal-p2p" || gateway_id == "direct-route-in-dialog" {
                     packet.uri = next_hop_uri.replace("<", "").replace(">", "");
                     self._router.get_client_source(&call_id).await.or(Some(src_addr))
                 } else if let Some(extracted_socket) = sip_utils::extract_socket_addr(&next_hop_uri) {
                     Some(extracted_socket)
                 } else {
-                    // [ARCH-COMPLIANCE] call_id argümanı eklendi
                     match self.state.resolve_addr(&next_hop_uri, &call_id).await {
                         Ok(addr) => Some(addr),
                         Err(e) => {
@@ -274,7 +272,6 @@ impl ProxyEngine {
                         realm: digest.realm.clone(),
                     });
 
-                    //[ARCH-COMPLIANCE] Kesin Timeout ZORUNLULUĞU
                     req.set_timeout(std::time::Duration::from_secs(2));
 
                     if !call_id.is_empty() {
@@ -320,7 +317,6 @@ impl ProxyEngine {
                 expires,
             });
             
-            // [ARCH-COMPLIANCE] Kesin Timeout ZORUNLULUĞU
             req.set_timeout(std::time::Duration::from_secs(2));
             
             if !call_id.is_empty() {
