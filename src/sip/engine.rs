@@ -185,13 +185,15 @@ impl ProxyEngine {
                     "🗺️ Yönlendirme kararı verildi"
                 );
 
+                // [ARCH-COMPLIANCE] Motorun DNS çözümlemesi çağrısı güncellendi
                 let target_addr = if gateway_id == "internal-p2p" || gateway_id == "direct-route-in-dialog" {
                     packet.uri = next_hop_uri.replace("<", "").replace(">", "");
                     self._router.get_client_source(&call_id).await.or(Some(src_addr))
                 } else if let Some(extracted_socket) = sip_utils::extract_socket_addr(&next_hop_uri) {
                     Some(extracted_socket)
                 } else {
-                    match self.state.resolve_addr(&next_hop_uri).await {
+                    // [ARCH-COMPLIANCE] call_id argümanı eklendi
+                    match self.state.resolve_addr(&next_hop_uri, &call_id).await {
                         Ok(addr) => Some(addr),
                         Err(e) => {
                             error!(event="DNS_FAIL", sip.call_id=%call_id, target=%next_hop_uri, error=%e, "Hedef çözümlenemedi");

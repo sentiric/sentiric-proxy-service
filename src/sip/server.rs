@@ -27,7 +27,8 @@ impl ProxyState {
         }
     }
 
-    pub async fn resolve_addr(&self, hostname: &str) -> Result<SocketAddr> {
+    // [ARCH-COMPLIANCE] Trace-ID (call_id) argümanı eklendi
+    pub async fn resolve_addr(&self, hostname: &str, call_id: &str) -> Result<SocketAddr> {
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Ok(addr);
         }
@@ -41,7 +42,8 @@ impl ProxyState {
             }
         }
 
-        debug!(event="DNS_RESOLVE_NETWORK", host=%hostname, "DNS ağdan çözümleniyor...");
+        // [ARCH-COMPLIANCE] sip.call_id açıkça loga eklendi
+        debug!(event="DNS_RESOLVE_NETWORK", sip.call_id=%call_id, host=%hostname, "DNS ağdan çözümleniyor...");
         let addr = lookup_host(hostname)
             .await?
             .next()
