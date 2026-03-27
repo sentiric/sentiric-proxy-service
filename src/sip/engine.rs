@@ -148,7 +148,10 @@ impl ProxyEngine {
                 packet.uri = format!("sip:{}@{}:{}", dest_user, real_peer.ip(), real_peer.port());
                 
                 SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
-                return Some((packet.clone(), Some(src_addr)));
+                
+                // [ARCH-COMPLIANCE] CRITICAL BUG FIX: src_addr (B2BUA) yerine real_peer (SBC/UAC) dönülmelidir!
+                // Aksi halde BYE paketleri kendi etrafında döner ve çağrılar asla kapanmaz.
+                return Some((packet.clone(), Some(real_peer))); 
             }
         }
 
