@@ -239,22 +239,10 @@ impl ProxyEngine {
             expires = sub[..end_idx].parse().unwrap_or(3600);
         }
 
-        let mut actual_contact_uri = contact_header.clone();
-        if let Some(via) = packet.get_header_value(HeaderName::Via) {
-            if via.contains("received=") || via.contains("rport=") {
-                let mut ip = String::new();
-                let mut port = 5060;
-                for param in via.split(';') {
-                    let p_trim = param.trim();
-                    if p_trim.starts_with("received=") { ip = p_trim[9..].to_string(); } 
-                    else if p_trim.starts_with("rport=") { if let Ok(p) = p_trim[6..].parse::<u16>() { port = p; } }
-                }
-                if !ip.is_empty() {
-                    let username = sip_utils::extract_username_from_uri(&contact_header); 
-                    actual_contact_uri = format!("<sip:{}@{}:{}>", username, ip, port);
-                }
-            }
-        }
+        // [ARCH-COMPLIANCE] FIX: Via başlığından IP/Port ezme mantığı (NAT Override) KALDIRILDI!
+        // SBC, Smart Topology Hiding ile Contact başlığına zaten istemcinin gerçek IP'sini (Real IP) yazıyor.
+        // Proxy'nin bu adresi SBC'nin iç IP'si ile (Via'dan okuyarak) ezmesi Routing Loop'lara (482) sebep oluyordu.
+        let actual_contact_uri = contact_header.clone();
 
         let auth_header = packet.get_header_value(HeaderName::Other("Authorization".to_string()));
         let mut is_authenticated = false;
