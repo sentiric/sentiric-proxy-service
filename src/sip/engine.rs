@@ -144,14 +144,16 @@ impl ProxyEngine {
             if let Some(real_peer) = self._router.resolve_in_dialog_target(&call_id, real_src_ip).await {
                 debug!(event="SIP_INBOUND_IN_DIALOG", sip.call_id=%call_id, target=%real_peer, "In-Dialog İstek Redis rotasıyla stateful yönlendiriliyor");
                 
-                let dest_user = sip_utils::extract_username_from_uri(&dest_uri);
-                packet.uri = format!("sip:{}@{}:{}", dest_user, real_peer.ip(), real_peer.port());
+                // [ARCH-COMPLIANCE] CRITICAL BUG FIX 1: Request-URI ASLA ezilmemelidir!
+                // Eğer URI'yi SBC'nin iç IP'si ile ezersek, SBC BYE paketini dışarıya (UAC/Operatör) 
+                // göndermek yerine kendisine geri gönderir (Routing Loop / Blackhole).
+                // SİLİNDİ: packet.uri = format!("sip:{}@{}:{}", dest_user, real_peer.ip(), real_peer.port());
                 
                 SipRouter::add_via(packet, &self.config.proxy_advertised_host, self.config.sip_port, "UDP");
                 
-                // [ARCH-COMPLIANCE] CRITICAL BUG FIX: src_addr (B2BUA) yerine real_peer (SBC/UAC) dönülmelidir!
-                // Aksi halde BYE paketleri kendi etrafında döner ve çağrılar asla kapanmaz.
-                return Some((packet.clone(), Some(real_peer))); 
+                // [ARCH-COMPLIANCE] CRITICAL BUG FIX 2: Hedef adres src_addr (B2BUA) değil, real_peer (SBC/UAC) olmalıdır!
+                // Eski hatalı kod: return Some((packet.clone(), Some(src_addr)));
+                return Some((packet.clone(), Some(real_peer)));
             }
         }
 
