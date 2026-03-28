@@ -1599,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "sentiric-sip-proxy-service"
-version = "1.6.16"
+version = "1.6.17"
 dependencies = [
  "anyhow",
  "chrono",
