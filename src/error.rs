@@ -20,9 +20,13 @@ impl From<ServiceError> for Status {
     fn from(err: ServiceError) -> Self {
         match err {
             ServiceError::GrpcStatus(s) => s,
-            ServiceError::SipParseError(msg) => Status::invalid_argument(format!("Geçersiz SIP: {}", msg)),
-            ServiceError::GrpcTransportError(e) => Status::unavailable(format!("gRPC bağlantı hatası: {}", e)),
-            _ => Status::internal(format!("{:#?}", err)), 
+            ServiceError::SipParseError(msg) => {
+                Status::invalid_argument(format!("Geçersiz SIP: {}", msg))
+            }
+            ServiceError::GrpcTransportError(e) => {
+                Status::unavailable(format!("gRPC bağlantı hatası: {}", e))
+            }
+            _ => Status::internal(format!("{:#?}", err)),
         }
     }
 }

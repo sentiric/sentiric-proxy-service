@@ -43,7 +43,13 @@ pub struct SutsFormatter {
 }
 
 impl SutsFormatter {
-    pub fn new(service_name: String, version: String, env: String, host_name: String, tenant_id: String) -> Self {
+    pub fn new(
+        service_name: String,
+        version: String,
+        env: String,
+        host_name: String,
+        tenant_id: String,
+    ) -> Self {
         Self {
             resource: ResourceContext {
                 service_name,
@@ -69,23 +75,28 @@ where
     ) -> fmt::Result {
         let meta = event.metadata();
         let ts = Utc::now().to_rfc3339();
-        
+
         let severity = match *meta.level() {
             tracing::Level::ERROR => "ERROR",
             tracing::Level::WARN => "WARN",
             tracing::Level::INFO => "INFO",
             tracing::Level::DEBUG => "DEBUG",
             tracing::Level::TRACE => "DEBUG",
-        }.to_string();
+        }
+        .to_string();
 
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
 
-        let event_name = visitor.fields.remove("event")
+        let event_name = visitor
+            .fields
+            .remove("event")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "LOG_EVENT".to_string());
 
-        let message = visitor.fields.remove("message")
+        let message = visitor
+            .fields
+            .remove("message")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(String::new);
 
@@ -132,13 +143,18 @@ struct JsonVisitor {
 
 impl tracing::field::Visit for JsonVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
-        self.fields.insert(field.name().to_string(), Value::String(format!("{:?}", value)));
+        self.fields.insert(
+            field.name().to_string(),
+            Value::String(format!("{:?}", value)),
+        );
     }
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.fields.insert(field.name().to_string(), Value::String(value.to_string()));
+        self.fields
+            .insert(field.name().to_string(), Value::String(value.to_string()));
     }
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        self.fields.insert(field.name().to_string(), Value::Bool(value));
+        self.fields
+            .insert(field.name().to_string(), Value::Bool(value));
     }
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
         self.fields.insert(field.name().to_string(), json!(value));
@@ -149,7 +165,12 @@ impl tracing::field::Visit for JsonVisitor {
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         self.fields.insert(field.name().to_string(), json!(value));
     }
-    fn record_error(&mut self, field: &tracing::field::Field, value: &(dyn std::error::Error + 'static)) {
-        self.fields.insert(field.name().to_string(), Value::String(value.to_string()));
+    fn record_error(
+        &mut self,
+        field: &tracing::field::Field,
+        value: &(dyn std::error::Error + 'static),
+    ) {
+        self.fields
+            .insert(field.name().to_string(), Value::String(value.to_string()));
     }
 }

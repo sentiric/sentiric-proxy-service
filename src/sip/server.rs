@@ -1,18 +1,18 @@
 // sentiric-proxy-service/src/sip/server.rs
 
 use crate::config::AppConfig;
-use crate::sip::engine::ProxyEngine;
-use crate::sip::handlers::routing::RedisConn; 
 use crate::grpc::service::MyProxyService;
+use crate::sip::engine::ProxyEngine;
+use crate::sip::handlers::routing::RedisConn;
 use anyhow::{anyhow, Result};
-use sentiric_sip_core::{parser, SipTransport, HeaderName};
+use dashmap::DashMap;
+use sentiric_sip_core::{parser, HeaderName, SipTransport};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::lookup_host;
-use tokio::sync::mpsc; 
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use dashmap::DashMap;
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
@@ -34,7 +34,7 @@ impl ProxyState {
         }
 
         let now = Instant::now();
-        
+
         if let Some(cached) = self.dns_cache.get(hostname) {
             let (addr, timestamp) = *cached;
             if now.duration_since(timestamp) < Duration::from_secs(60) {
@@ -48,7 +48,7 @@ impl ProxyState {
             .await?
             .next()
             .ok_or_else(|| anyhow!("DNS kaydı bulunamadı: {}", hostname))?;
-        
+
         self.dns_cache.insert(hostname.to_string(), (addr, now));
         Ok(addr)
     }
@@ -98,7 +98,7 @@ impl SipServer {
                     match res {
                         Ok((len, src_addr)) => {
                             if len < 4 { continue; }
-                            
+
                             if len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
                                 continue;
                             }
@@ -108,14 +108,14 @@ impl SipServer {
                             match parser::parse(data) {
                                 Ok(mut packet) => {
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
-                                    
+
                                     // [ARCH-COMPLIANCE] TYPE FIX: status_code is natively u16
-                                    let method = if packet.is_request() { 
-                                        packet.method.as_str().to_string() 
-                                    } else { 
-                                        format!("RESPONSE/{}", packet.status_code) 
+                                    let method = if packet.is_request() {
+                                        packet.method.as_str().to_string()
+                                    } else {
+                                        format!("RESPONSE/{}", packet.status_code)
                                     };
-                                    
+
                                     debug!(
                                         event = "SIP_PACKET_RECEIVED",
                                         sip.call_id = %call_id,
@@ -127,12 +127,12 @@ impl SipServer {
 
                                     if let Some((resp_packet, target_addr_opt)) = self.engine.process_packet(&mut packet, src_addr).await {
                                         if let Some(dest) = target_addr_opt {
-                                            
+
                                             //[ARCH-COMPLIANCE] TYPE FIX
-                                            let resp_method = if resp_packet.is_request() { 
-                                                resp_packet.method.as_str().to_string() 
-                                            } else { 
-                                                format!("RESPONSE/{}", resp_packet.status_code) 
+                                            let resp_method = if resp_packet.is_request() {
+                                                resp_packet.method.as_str().to_string()
+                                            } else {
+                                                format!("RESPONSE/{}", resp_packet.status_code)
                                             };
 
                                             info!(

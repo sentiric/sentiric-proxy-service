@@ -2,7 +2,7 @@
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use std::net::SocketAddr;
-use tracing::{debug, warn}; 
+use tracing::{debug, warn};
 
 pub type RedisConn = ConnectionManager;
 
@@ -24,15 +24,17 @@ impl RoutingHandler {
 
         let mut conn = self.redis.clone();
         let result: redis::RedisResult<String> = conn.get(&target_key).await;
-        
+
         match result {
             Ok(target_str) => {
                 if let Ok(addr) = target_str.parse::<SocketAddr>() {
                     return Some(addr);
                 }
-            },
+            }
             //[ARCH-COMPLIANCE] SUTS v4.0 Loglama kuralı uygulandı
-            Err(_) => { warn!(event="REDIS_KEY_NOT_FOUND", target_key=%target_key, "⚠️[ROUTING] Redis anahtarı bulunamadı: {}", target_key); }
+            Err(_) => {
+                warn!(event="REDIS_KEY_NOT_FOUND", target_key=%target_key, "⚠️[ROUTING] Redis anahtarı bulunamadı: {}", target_key);
+            }
         }
         None
     }
@@ -40,7 +42,7 @@ impl RoutingHandler {
     pub async fn get_client_source(&self, call_id: &str) -> Option<SocketAddr> {
         let client_key = format!("proxy:route:{}:caller", call_id);
         let mut conn = self.redis.clone();
-        
+
         let result: redis::RedisResult<String> = conn.get(&client_key).await;
         if let Ok(target_str) = result {
             return target_str.parse::<SocketAddr>().ok();
@@ -48,24 +50,35 @@ impl RoutingHandler {
         None
     }
 
-    pub async fn register_call_route(&self, call_id: &str, src_addr: SocketAddr, target_addr: SocketAddr) {
+    pub async fn register_call_route(
+        &self,
+        call_id: &str,
+        src_addr: SocketAddr,
+        target_addr: SocketAddr,
+    ) {
         let caller_key = format!("proxy:route:{}:caller", call_id);
         let callee_key = format!("proxy:route:{}:callee", call_id);
 
         let mut conn = self.redis.clone();
         let _: redis::RedisResult<()> = conn.set_ex(&caller_key, src_addr.to_string(), 3600).await;
-        let _: redis::RedisResult<()> = conn.set_ex(&callee_key, target_addr.to_string(), 3600).await;
+        let _: redis::RedisResult<()> = conn
+            .set_ex(&callee_key, target_addr.to_string(), 3600)
+            .await;
     }
 
     //[YENİ] In-Dialog İki Yönlü P2P Rota Çözücü
-    pub async fn resolve_in_dialog_target(&self, call_id: &str, real_src_addr: SocketAddr) -> Option<SocketAddr> {
+    pub async fn resolve_in_dialog_target(
+        &self,
+        call_id: &str,
+        real_src_addr: SocketAddr,
+    ) -> Option<SocketAddr> {
         let caller_key = format!("proxy:route:{}:caller", call_id);
         let callee_key = format!("proxy:route:{}:callee", call_id);
         let mut conn = self.redis.clone();
-        
+
         let caller_str: redis::RedisResult<String> = conn.get(&caller_key).await;
         let callee_str: redis::RedisResult<String> = conn.get(&callee_key).await;
-        
+
         let caller_addr = caller_str.ok().and_then(|s| s.parse::<SocketAddr>().ok());
         let callee_addr = callee_str.ok().and_then(|s| s.parse::<SocketAddr>().ok());
 
@@ -78,7 +91,7 @@ impl RoutingHandler {
                 return Some(c_ee);
             }
         }
-        
+
         callee_addr
     }
 }

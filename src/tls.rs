@@ -6,13 +6,19 @@ use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 
 pub async fn load_server_tls_config(config: &AppConfig) -> Result<ServerTlsConfig> {
     let identity = {
-        let cert = fs::read(&config.cert_path).await.context("Sunucu sertifikası okunamadı")?;
-        let key = fs::read(&config.key_path).await.context("Sunucu anahtarı okunamadı")?;
+        let cert = fs::read(&config.cert_path)
+            .await
+            .context("Sunucu sertifikası okunamadı")?;
+        let key = fs::read(&config.key_path)
+            .await
+            .context("Sunucu anahtarı okunamadı")?;
         Identity::from_pem(cert, key)
     };
-    
+
     let client_ca_cert = {
-        let ca = fs::read(&config.ca_path).await.context("CA sertifikası okunamadı")?;
+        let ca = fs::read(&config.ca_path)
+            .await
+            .context("CA sertifikası okunamadı")?;
         Certificate::from_pem(ca)
     };
 

@@ -13,8 +13,8 @@ pub struct DigestAuth {
 impl DigestAuth {
     pub fn parse(auth_header: &str) -> Option<Self> {
         let header_clean = auth_header.trim();
-        if !header_clean.to_lowercase().starts_with("digest ") { 
-            return None; 
+        if !header_clean.to_lowercase().starts_with("digest ") {
+            return None;
         }
 
         let mut map = HashMap::new();
