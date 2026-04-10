@@ -128,14 +128,16 @@ impl SipServer {
                                     if let Some((resp_packet, target_addr_opt)) = self.engine.process_packet(&mut packet, src_addr).await {
                                         if let Some(dest) = target_addr_opt {
 
-                                            //[ARCH-COMPLIANCE] TYPE FIX
+                                            // [ARCH-COMPLIANCE] TYPE FIX
                                             let resp_method = if resp_packet.is_request() {
                                                 resp_packet.method.as_str().to_string()
                                             } else {
                                                 format!("RESPONSE/{}", resp_packet.status_code)
                                             };
 
-                                            info!(
+                                            // [ARCH-COMPLIANCE] SUTS v4.2: Paket iletim detayı INFO'dan DEBUG'a çekildi.
+                                            // INFO seviyesinde sadece kritik yönlendirme kararları (GetNextHop) kalacak.
+                                            debug!(
                                                 event = "SIP_PACKET_SENT",
                                                 sip.call_id = %call_id,
                                                 sip.method = %resp_method,
@@ -145,6 +147,7 @@ impl SipServer {
                                             );
 
                                             let resp_bytes = resp_packet.to_bytes();
+
                                             if let Err(e) = self.transport.send(&resp_bytes, dest).await {
                                                 error!(
                                                     event = "SIP_SEND_ERROR",

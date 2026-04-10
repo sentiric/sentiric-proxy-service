@@ -1,7 +1,7 @@
 # Dosya: sentiric-sip-proxy-service/Cargo.toml
 [package]
 name = "sentiric-sip-proxy-service"
-version = "1.6.17"
+version = "1.6.18"
 edition = "2021"
 
 [dependencies]
@@ -36,4 +36,4 @@ md5 = "0.7"
 
 # --- THE IRON CORE ---
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.5.6" }
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.17.0" }
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.20.8" }
