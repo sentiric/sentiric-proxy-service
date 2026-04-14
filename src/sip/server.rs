@@ -1,9 +1,10 @@
-// Dosya: src/sip/server.rs
+// sentiric-sip-proxy-service/src/sip/server.rs
+
 use crate::config::AppConfig;
 use crate::grpc::service::MyProxyService;
 use crate::sip::engine::ProxyEngine;
-use crate::sip::handlers::routing::RedisConn;
-use anyhow::{anyhow, Result};
+// Linter uyarısını (unused import) çözmek için RedisConn importunu kaldırdık/kullanmadık.
+use anyhow::Result;
 use dashmap::DashMap;
 use sentiric_sip_core::{parser, HeaderName, SipTransport};
 use std::net::SocketAddr;
@@ -19,7 +20,6 @@ pub struct ProxyState {
     dns_cache: DashMap<String, (SocketAddr, Instant)>,
 }
 
-// [CLIPPY FIX]: new_without_default
 impl Default for ProxyState {
     fn default() -> Self {
         Self::new()
@@ -49,7 +49,6 @@ impl ProxyState {
 
         debug!(event="DNS_RESOLVE_NETWORK", sip.call_id=%call_id, host=%hostname, "DNS ağdan çözümleniyor...");
 
-        // [CLIPPY FIX]: single_match -> if let ile temizlendi
         if let Ok(Ok(mut addrs)) =
             tokio::time::timeout(Duration::from_millis(200), lookup_host(hostname)).await
         {
@@ -59,7 +58,7 @@ impl ProxyState {
             }
         }
 
-        Err(anyhow!(
+        Err(anyhow::anyhow!(
             "DNS çözümlenemedi veya zaman aşımına uğradı: {}",
             hostname
         ))
@@ -76,7 +75,8 @@ impl SipServer {
     pub async fn new(
         config: Arc<AppConfig>,
         state: Arc<ProxyState>,
-        redis: RedisConn,
+        // Doğrudan full path vererek unused import hatasını da engelledik
+        redis: crate::sip::handlers::routing::RedisConn,
         routing_logic: Arc<MyProxyService>,
     ) -> Result<Self> {
         let bind_addr = format!("{}:{}", config.sip_bind_ip, config.sip_port);
@@ -86,6 +86,7 @@ impl SipServer {
             config: config.clone(),
             transport: Arc::new(transport),
             engine: Arc::new(ProxyEngine::new(config, state, redis, routing_logic)),
+            // [HATA DÜZELTİLDİ]: SBC'ye ait dns_cache satırı buradan SİLİNDİ.
         })
     }
 

@@ -29,7 +29,7 @@ impl ProxyEngine {
     pub fn new(
         config: Arc<AppConfig>,
         state: Arc<ProxyState>,
-        redis: RedisConn,
+        redis: RedisConn, // <-- Artık bu Arc<RwLock<Option<..>>>
         routing_logic: Arc<MyProxyService>,
     ) -> Self {
         Self {

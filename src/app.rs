@@ -1,4 +1,4 @@
-// Dosya: src/app.rs
+// src/app.rs
 use crate::config::AppConfig;
 use crate::grpc::client::InternalClients;
 use crate::grpc::service::MyProxyService;
@@ -15,7 +15,7 @@ use std::convert::Infallible;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tonic::transport::Server as GrpcServer;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
@@ -37,7 +37,6 @@ impl App {
         dotenvy::dotenv().ok();
         let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon yüklenemedi")?);
 
-        // --- SUTS v4.0 LOGGING SETUP ---
         let rust_log_env = env::var("RUST_LOG").unwrap_or_else(|_| config.rust_log.clone());
         let env_filter =
             EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
@@ -49,9 +48,8 @@ impl App {
                 config.service_version.clone(),
                 config.env.clone(),
                 config.node_hostname.clone(),
-                config.tenant_id.clone(), //[ARCH-COMPLIANCE] Tenant enjekte edildi
+                config.tenant_id.clone(),
             );
-
             subscriber
                 .with(fmt::layer().event_format(suts_formatter))
                 .init();
@@ -76,33 +74,40 @@ impl App {
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
         let (grpc_stop_tx, mut grpc_stop_rx) = mpsc::channel(1);
 
-        // 1. Redis (Auto-Healing Connection Manager)
-        info!(event="REDIS_CONNECT", url=%self.config.redis_url, "Redis'e bağlanılıyor...");
-        let redis_client = redis::Client::open(self.config.redis_url.as_str())?;
-
-        let mut first_error = true;
-        let redis_conn = loop {
-            match redis::aio::ConnectionManager::new(redis_client.clone()).await {
-                Ok(conn) => break conn,
-                Err(e) => {
-                    // [ARCH-COMPLIANCE FIX] SUTS v4.2: Sadece ilk hata ERROR, sonrakiler DEBUG
-                    if first_error {
-                        error!(event="REDIS_ERROR", error=%e, "Redis bağlantı hatası. Arka planda sessizce denenmeye devam edilecek (Ghost Mode)...");
-                        first_error = false;
-                    } else {
-                        tracing::debug!(event="REDIS_RETRY", error=%e, "Redis bağlantısı bekleniyor...");
-                    }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            }
-        };
-
-        // 2. Logic & Clients
+        // 1. Logic & Clients (Boş Başlat)
         let clients_container = Arc::new(Mutex::new(None));
         let routing_logic = Arc::new(MyProxyService::new(
             self.config.clone(),
             clients_container.clone(),
         ));
+
+        // 2. Redis Bağlantısını Arka Plana (Background Task) Atıyoruz! (MİMARİ DEVRİM)
+        let redis_store = Arc::new(RwLock::new(None));
+        let redis_store_clone = redis_store.clone();
+        let redis_url = self.config.redis_url.clone();
+
+        tokio::spawn(async move {
+            info!(event="REDIS_CONNECT_ASYNC", url=%redis_url, "Redis arka planda başlatılıyor...");
+            if let Ok(client) = redis::Client::open(redis_url.as_str()) {
+                let mut first_error = true;
+                loop {
+                    match redis::aio::ConnectionManager::new(client.clone()).await {
+                        Ok(conn) => {
+                            info!(event = "REDIS_RECOVERED", "✅ Redis bağlantısı sağlandı.");
+                            *redis_store_clone.write().await = Some(conn);
+                            break;
+                        }
+                        Err(e) => {
+                            if first_error {
+                                error!(event="REDIS_ERROR", error=%e, "Redis yok! Proxy Stateless modda çalışacak (Ghost Mode).");
+                                first_error = false;
+                            }
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+            }
+        });
 
         // 3. gRPC Server
         let grpc_config = self.config.clone();
@@ -111,16 +116,13 @@ impl App {
             let tls_config = load_server_tls_config(&grpc_config)
                 .await
                 .expect("TLS hatası");
-
             info!(event="GRPC_SERVER_START", addr=%grpc_config.grpc_listen_addr, "gRPC Sunucusu başlatılıyor...");
-
             GrpcServer::builder()
                 .tls_config(tls_config)
                 .expect("TLS hatası")
                 .add_service(ProxyServiceServer::from_arc(grpc_logic_ref))
                 .serve_with_shutdown(grpc_config.grpc_listen_addr, async {
                     let _ = grpc_stop_rx.recv().await;
-                    info!(event = "GRPC_SHUTDOWN_SIGNAL", "gRPC sunucusu kapanıyor.");
                 })
                 .await
                 .context("gRPC sunucusu çöktü")
@@ -129,7 +131,6 @@ impl App {
         // 4. Client Manager
         let clients_container_clone = clients_container.clone();
         let config_clone = self.config.clone();
-
         let clients = InternalClients::connect(&config_clone)
             .await
             .context("İstemciler başlatılamadı")?;
@@ -138,10 +139,10 @@ impl App {
             *guard = Some(clients);
         }
 
-        // 5. SIP Server
+        // 5. SIP Server (Redis Store'u Enjekte Ediyoruz)
         let sip_config = self.config.clone();
         let state = Arc::new(ProxyState::new());
-        let sip_server = SipServer::new(sip_config, state, redis_conn, routing_logic).await?;
+        let sip_server = SipServer::new(sip_config, state, redis_store, routing_logic).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
         });
@@ -168,20 +169,18 @@ impl App {
             tokio::signal::ctrl_c().await.expect("Ctrl+C hatası");
         };
 
-        //[ARCH-COMPLIANCE] ARCH-007 Loglama Event Key Zorunluluğu
         tokio::select! {
             res = grpc_server_handle => { if let Err(e) = res? { error!(event="GRPC_SERVER_CRASH", "gRPC Error: {}", e); } },
             _res = sip_handle => { error!(event="SIP_SERVER_CRASH", "SIP Server durdu"); },
             _res = http_server_handle => { error!(event="HTTP_SERVER_CRASH", "HTTP Server durdu"); },
             _ = ctrl_c => { warn!(event="SIGINT_RECEIVED", "Kapatma sinyali alındı."); },
-            _ = shutdown_rx.recv() => { warn!(event="SHUTDOWN_RECV", "Kapatma sinyali."); }
+            _ = shutdown_rx.recv() => {}
         }
 
         let _ = grpc_stop_tx.send(()).await;
         let _ = sip_shutdown_tx.send(()).await;
         let _ = http_shutdown_tx.send(());
         tokio::time::sleep(Duration::from_millis(500)).await;
-
         info!(event = "SYSTEM_STOPPED", "Servis durduruldu.");
         Ok(())
     }
