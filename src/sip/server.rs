@@ -33,7 +33,9 @@ impl ProxyState {
         }
     }
 
-    pub async fn resolve_addr(&self, hostname: &str, call_id: &str) -> Result<SocketAddr> {
+    // [DNS OPTIMIZATION]: DNS sonuçlarını 60 saniye boyunca önbelleğe alarak performansı artırıyoruz.
+    // [DNS FALLBACK]: Consul çözümlenemediğinde Docker'ın native DNS'ini deniyoruz. Bu, özellikle Kubernetes ortamlarında faydalı olabilir.
+    pub async fn resolve_addr(&self, hostname: &str, call_id: &str) -> anyhow::Result<SocketAddr> {
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Ok(addr);
         }
@@ -47,14 +49,32 @@ impl ProxyState {
             }
         }
 
-        debug!(event="DNS_RESOLVE_NETWORK", sip.call_id=%call_id, host=%hostname, "DNS ağdan çözümleniyor...");
+        tracing::debug!(event="DNS_RESOLVE_NETWORK", sip.call_id=%call_id, host=%hostname, "DNS ağdan çözümleniyor...");
 
         if let Ok(Ok(mut addrs)) =
-            tokio::time::timeout(Duration::from_millis(200), lookup_host(hostname)).await
+            tokio::time::timeout(Duration::from_millis(150), lookup_host(hostname)).await
         {
             if let Some(addr) = addrs.next() {
                 self.dns_cache.insert(hostname.to_string(), (addr, now));
                 return Ok(addr);
+            }
+        }
+
+        // [ARCH-COMPLIANCE FIX] Consul yoksa Docker Native DNS Fallback.
+        // Lifetime hatası bare_host'u string'e çevirip lookup_host'a paslayarak çözüldü.
+        if hostname.contains(".service.sentiric.cloud") {
+            let bare_host = hostname.replace(".service.sentiric.cloud", "");
+            tracing::warn!(event="DNS_FALLBACK", sip.call_id=%call_id, host=%hostname, bare_host=%bare_host, "Consul yanıt vermedi. Docker Native DNS deneniyor...");
+
+            // Fix: lookup_host'a referans değil, string'in kendisini paslıyoruz.
+            if let Ok(Ok(mut addrs)) =
+                tokio::time::timeout(Duration::from_millis(150), lookup_host(bare_host.clone()))
+                    .await
+            {
+                if let Some(addr) = addrs.next() {
+                    self.dns_cache.insert(hostname.to_string(), (addr, now));
+                    return Ok(addr);
+                }
             }
         }
 
