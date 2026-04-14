@@ -1,5 +1,4 @@
-// sentiric-proxy-service/src/sip/server.rs
-
+// Dosya: src/sip/server.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MyProxyService;
 use crate::sip::engine::ProxyEngine;
@@ -20,6 +19,13 @@ pub struct ProxyState {
     dns_cache: DashMap<String, (SocketAddr, Instant)>,
 }
 
+// [CLIPPY FIX]: new_without_default
+impl Default for ProxyState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProxyState {
     pub fn new() -> Self {
         Self {
@@ -27,7 +33,6 @@ impl ProxyState {
         }
     }
 
-    // [ARCH-COMPLIANCE] Trace-ID (call_id) argümanı eklendi
     pub async fn resolve_addr(&self, hostname: &str, call_id: &str) -> Result<SocketAddr> {
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Ok(addr);
@@ -42,22 +47,29 @@ impl ProxyState {
             }
         }
 
-        // [ARCH-COMPLIANCE] sip.call_id açıkça loga eklendi
         debug!(event="DNS_RESOLVE_NETWORK", sip.call_id=%call_id, host=%hostname, "DNS ağdan çözümleniyor...");
-        let addr = lookup_host(hostname)
-            .await?
-            .next()
-            .ok_or_else(|| anyhow!("DNS kaydı bulunamadı: {}", hostname))?;
 
-        self.dns_cache.insert(hostname.to_string(), (addr, now));
-        Ok(addr)
+        // [CLIPPY FIX]: single_match -> if let ile temizlendi
+        if let Ok(Ok(mut addrs)) =
+            tokio::time::timeout(Duration::from_millis(200), lookup_host(hostname)).await
+        {
+            if let Some(addr) = addrs.next() {
+                self.dns_cache.insert(hostname.to_string(), (addr, now));
+                return Ok(addr);
+            }
+        }
+
+        Err(anyhow!(
+            "DNS çözümlenemedi veya zaman aşımına uğradı: {}",
+            hostname
+        ))
     }
 }
 
 pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
-    engine: ProxyEngine,
+    engine: Arc<ProxyEngine>,
 }
 
 impl SipServer {
@@ -73,7 +85,7 @@ impl SipServer {
         Ok(Self {
             config: config.clone(),
             transport: Arc::new(transport),
-            engine: ProxyEngine::new(config, state, redis, routing_logic),
+            engine: Arc::new(ProxyEngine::new(config, state, redis, routing_logic)),
         })
     }
 
@@ -84,10 +96,14 @@ impl SipServer {
             "📡 Proxy SIP Dinleyicisi Aktif"
         );
 
-        let mut buf = vec![0u8; 65535];
         let socket = self.transport.get_socket();
+        let engine = self.engine.clone();
+        let transport = self.transport.clone();
 
         loop {
+            // Buffer'ı döngü içine aldık: Vektör sahipliği task'a clone yerine move edilecek.
+            let mut buf = vec![0u8; 65535];
+
             tokio::select! {
                 _ = shutdown_rx.recv() => {
                     info!(event="SIP_SHUTDOWN", "SIP Sunucusu kapatılıyor...");
@@ -103,40 +119,38 @@ impl SipServer {
                                 continue;
                             }
 
-                            let data = &buf[..len];
+                            let payload = buf[..len].to_vec();
+                            let engine_clone = engine.clone();
+                            let transport_clone = transport.clone();
 
-                            match parser::parse(data) {
-                                Ok(mut packet) => {
-                                    let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+                            tokio::spawn(async move {
+                                match parser::parse(&payload) {
+                                    Ok(mut packet) => {
+                                        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
-                                    // [ARCH-COMPLIANCE] TYPE FIX: status_code is natively u16
-                                    let method = if packet.is_request() {
-                                        packet.method.as_str().to_string()
-                                    } else {
-                                        format!("RESPONSE/{}", packet.status_code)
-                                    };
+                                        let method = if packet.is_request() {
+                                            packet.method.as_str().to_string()
+                                        } else {
+                                            format!("RESPONSE/{}", packet.status_code)
+                                        };
 
-                                    debug!(
-                                        event = "SIP_PACKET_RECEIVED",
-                                        sip.call_id = %call_id,
-                                        sip.method = %method,
-                                        net.src.ip = %src_addr.ip(),
-                                        net.src.port = src_addr.port(),
-                                        "📥 SIP paketi alındı"
-                                    );
+                                        debug!(
+                                            event = "SIP_PACKET_RECEIVED",
+                                            sip.call_id = %call_id,
+                                            sip.method = %method,
+                                            net.src.ip = %src_addr.ip(),
+                                            net.src.port = src_addr.port(),
+                                            "📥 SIP paketi alındı"
+                                        );
 
-                                    if let Some((resp_packet, target_addr_opt)) = self.engine.process_packet(&mut packet, src_addr).await {
-                                        if let Some(dest) = target_addr_opt {
-
-                                            // [ARCH-COMPLIANCE] TYPE FIX
+                                        // [CLIPPY FIX]: collapsible_match -> İki if let birleştirildi
+                                        if let Some((resp_packet, Some(dest))) = engine_clone.process_packet(&mut packet, src_addr).await {
                                             let resp_method = if resp_packet.is_request() {
                                                 resp_packet.method.as_str().to_string()
                                             } else {
                                                 format!("RESPONSE/{}", resp_packet.status_code)
                                             };
 
-                                            // [ARCH-COMPLIANCE] SUTS v4.2: Paket iletim detayı INFO'dan DEBUG'a çekildi.
-                                            // INFO seviyesinde sadece kritik yönlendirme kararları (GetNextHop) kalacak.
                                             debug!(
                                                 event = "SIP_PACKET_SENT",
                                                 sip.call_id = %call_id,
@@ -148,7 +162,7 @@ impl SipServer {
 
                                             let resp_bytes = resp_packet.to_bytes();
 
-                                            if let Err(e) = self.transport.send(&resp_bytes, dest).await {
+                                            if let Err(e) = transport_clone.send(&resp_bytes, dest).await {
                                                 error!(
                                                     event = "SIP_SEND_ERROR",
                                                     sip.call_id = %call_id,
@@ -158,12 +172,12 @@ impl SipServer {
                                                 );
                                             }
                                         }
+                                    },
+                                    Err(e) => {
+                                        warn!(event="SIP_PARSE_ERROR", src=%src_addr, error=%e, "⚠️ Bozuk SIP paketi");
                                     }
-                                },
-                                Err(e) => {
-                                    warn!(event="SIP_PARSE_ERROR", src=%src_addr, error=%e, "⚠️ Bozuk SIP paketi");
                                 }
-                            }
+                            });
                         },
                         Err(e) => {
                             error!(event="UDP_ERROR", error=%e, "🔥 UDP Soket Hatası");

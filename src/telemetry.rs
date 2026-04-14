@@ -39,7 +39,7 @@ struct ResourceContext {
 
 pub struct SutsFormatter {
     resource: ResourceContext,
-    tenant_id: String, // [ARCH-COMPLIANCE] Dinamik Tenant ID eklendi
+    tenant_id: String,
 }
 
 impl SutsFormatter {
@@ -100,15 +100,20 @@ where
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(String::new);
 
-        let trace_id = if let Some(tid) = visitor.fields.get("trace_id").and_then(|v| v.as_str()) {
-            Some(tid.to_string())
-        } else if let Some(cid) = visitor.fields.get("sip.call_id").and_then(|v| v.as_str()) {
-            Some(cid.to_string())
-        } else {
-            None
-        };
+        // [CLIPPY FIX]: manual_map
+        let trace_id = visitor
+            .fields
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                visitor
+                    .fields
+                    .get("sip.call_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
 
-        // [ARCH-COMPLIANCE] Span ID Propagation (OTel Uyumlu)
         let span_id = ctx
             .lookup_current()
             .map(|span| format!("{:016x}", span.id().into_u64()))

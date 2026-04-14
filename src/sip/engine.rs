@@ -1,10 +1,12 @@
-// Dosya: sentiric-sip-proxy-service/src/sip/engine.rs
+// Dosya: src/sip/engine.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MyProxyService;
 use crate::sip::handlers::routing::{RedisConn, RoutingHandler};
 use crate::sip::server::ProxyState;
 
 use dashmap::DashMap;
+// [CRITICAL FIX]: Trait import edildi. Yoksa get_next_hop metodu bulunamaz!
+use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
 use sentiric_sip_core::{
     builder::SipResponseFactory, utils as sip_utils, Header, HeaderName, Method, SipPacket,
     SipRouter, SipTransaction, TransactionAction, TransactionEngine,
@@ -12,8 +14,6 @@ use sentiric_sip_core::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
-
-use sentiric_contracts::sentiric::sip::v1::proxy_service_server::ProxyService;
 
 pub type TransactionStore = Arc<DashMap<String, SipTransaction>>;
 
@@ -53,10 +53,6 @@ impl ProxyEngine {
             .unwrap_or_default();
 
         if packet.is_request() {
-            // [ARCH-COMPLIANCE] MİMARİ AĞ DÜZELTMESİ (Kritik)
-            // Konteynerlar arası NAT sınırını asabilmek icin SIP Via basligina gercek
-            // fiziksel soket adresini kaziyoruz. Bu sayede 200 OK yanıtı kör noktaya degil
-            // tam olarak istegin geldigi Docker pod'una donecektir.
             SipRouter::fix_nat_via(packet, src_addr);
 
             let is_in_dialog = packet.is_in_dialog_request();
@@ -190,10 +186,6 @@ impl ProxyEngine {
             {
                 debug!(event="SIP_INBOUND_IN_DIALOG", sip.call_id=%call_id, target=%real_peer, "In-Dialog İstek Redis rotasıyla stateful yönlendiriliyor");
 
-                // [ARCH-COMPLIANCE] CRITICAL FIX: Request-URI ASLA ezilmemelidir!
-                // Eski kodda URI SBC'nin iç IP'si ile eziliyordu, bu da SBC'nin BYE paketlerini
-                // dışarı atmak yerine kendine çevirmesine (Routing Loop) neden oluyordu.
-
                 SipRouter::add_via(
                     packet,
                     &self.config.proxy_advertised_host,
@@ -201,8 +193,6 @@ impl ProxyEngine {
                     "UDP",
                 );
 
-                // [ARCH-COMPLIANCE] CRITICAL FIX 2: Hedef adres src_addr (B2BUA) değil,
-                // yönlendirilen gerçek hedef olan real_peer (SBC) olmalıdır.
                 return Some((packet.clone(), Some(real_peer)));
             }
         }
@@ -224,6 +214,7 @@ impl ProxyEngine {
             }
         }
 
+        // [CRITICAL FIX]: get_next_hop metodu artık ProxyService trait'i dahil olduğu için bulunabilecek.
         match self.routing_logic.get_next_hop(request).await {
             Ok(res) => {
                 let inner_res = res.into_inner();
@@ -280,20 +271,20 @@ impl ProxyEngine {
                         self.config.sip_port,
                         "UDP",
                     );
-                    return Some((packet.clone(), Some(target)));
+                    Some((packet.clone(), Some(target)))
                 } else {
-                    return Some((
+                    Some((
                         SipResponseFactory::create_error(packet, 404, "Not Found"),
                         Some(src_addr),
-                    ));
+                    ))
                 }
             }
             Err(e) => {
                 error!(event="ROUTING_LOGIC_ERROR", sip.call_id=%call_id, error=%e, "Yönlendirme mantığı hatası");
-                return Some((
+                Some((
                     SipResponseFactory::create_error(packet, 503, "Service Unavailable"),
                     Some(src_addr),
-                ));
+                ))
             }
         }
     }
@@ -326,9 +317,6 @@ impl ProxyEngine {
             expires = sub[..end_idx].parse().unwrap_or(3600);
         }
 
-        // [ARCH-COMPLIANCE] FIX: Via başlığından IP/Port ezme mantığı (NAT Override) KALDIRILDI!
-        // SBC, Smart Topology Hiding ile Contact başlığına zaten istemcinin gerçek IP'sini (Real IP) yazıyor.
-        // Proxy'nin bu adresi SBC'nin iç IP'si ile (Via'dan okuyarak) ezmesi Routing Loop'lara (482) sebep oluyordu.
         let actual_contact_uri = contact_header.clone();
 
         let auth_header = packet.get_header_value(HeaderName::Other("Authorization".to_string()));
@@ -445,9 +433,7 @@ impl ProxyEngine {
         &self,
         packet: &mut SipPacket,
     ) -> Option<(SipPacket, Option<SocketAddr>)> {
-        if SipRouter::strip_top_via(packet).is_none() {
-            return None;
-        }
+        SipRouter::strip_top_via(packet)?;
 
         let call_id = packet
             .get_header_value(HeaderName::CallId)

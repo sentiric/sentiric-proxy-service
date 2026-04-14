@@ -1,4 +1,4 @@
-// Dosya: sentiric-sip-proxy-service/src/grpc/service.rs
+// Dosya: src/grpc/service.rs
 use sentiric_contracts::sentiric::dialplan::v1::{
     ActionType, ResolveDialplanRequest, ResolveDialplanResponse,
 };
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
-use tracing::{error, info, instrument, warn, Span};
+use tracing::{debug, error, instrument, warn, Span};
 
 type DialplanCache = DashMap<String, (ResolveDialplanResponse, Instant)>;
 
@@ -69,10 +69,9 @@ impl ProxyService for MyProxyService {
         }
 
         // 2. In-Dialog İstekler (ACK, BYE - Direkt Rota)
-        //[ARCH-COMPLIANCE]: P2P iletişimlerinde hedef direkt olarak muhatap IP'sidir.
-        // B2BUA zorlaması (Hardcoding) kaldırılarak ağ döngüsü (loop) engellendi.
         if req.is_in_dialog && req.method != "CANCEL" {
-            let target_uri = req.destination_uri.replace('<', "").replace('>', "");
+            // [CLIPPY FIX]: collapsible-str-replace
+            let target_uri = req.destination_uri.replace(['<', '>'], "");
             return Ok(Response::new(GetNextHopResponse {
                 uri: target_uri,
                 gateway_id: "direct-route-in-dialog".to_string(),
@@ -98,9 +97,10 @@ impl ProxyService for MyProxyService {
         let mut dialplan_client = clients_ref.dialplan.clone();
         drop(clients_guard);
 
-        let max_retries = 3;
+        // [ARCH-COMPLIANCE FIX] Fail-Fast.
+        let max_retries = 2;
         let mut attempt = 0;
-        let mut backoff = Duration::from_millis(500);
+        let mut backoff = Duration::from_millis(150);
 
         let resolution = loop {
             attempt += 1;
@@ -111,8 +111,7 @@ impl ProxyService for MyProxyService {
                 destination_number: destination_user.clone(),
             });
 
-            // [ARCH-COMPLIANCE] ARCH-004 Kesin Timeout Zorunluluğu
-            dp_req.set_timeout(Duration::from_secs(3));
+            dp_req.set_timeout(Duration::from_secs(2));
 
             if trace_id != "unknown" {
                 let _ = dp_req
@@ -120,8 +119,7 @@ impl ProxyService for MyProxyService {
                     .insert("x-trace-id", trace_id.parse().unwrap());
             }
 
-            // [ARCH-COMPLIANCE] sip.call_id loglara eklendi
-            info!(
+            debug!(
                 event="GRPC_OUT_ATTEMPT",
                 sip.call_id=%trace_id,
                 grpc.target="dialplan-service",
@@ -132,7 +130,7 @@ impl ProxyService for MyProxyService {
 
             match dialplan_client.resolve_dialplan(dp_req).await {
                 Ok(res) => {
-                    info!(
+                    debug!(
                         event="GRPC_OUT_SUCCESS",
                         sip.call_id=%trace_id,
                         grpc.target="dialplan-service",
@@ -203,7 +201,6 @@ impl MyProxyService {
                     sip_uri: dest_uri.to_string(),
                 });
 
-                // [ARCH-COMPLIANCE] ARCH-004 Kesin Timeout Zorunluluğu
                 lookup_req.set_timeout(Duration::from_secs(2));
 
                 if trace_id != "unknown" {
