@@ -80,11 +80,18 @@ impl App {
         info!(event="REDIS_CONNECT", url=%self.config.redis_url, "Redis'e bağlanılıyor...");
         let redis_client = redis::Client::open(self.config.redis_url.as_str())?;
 
+        let mut first_error = true;
         let redis_conn = loop {
             match redis::aio::ConnectionManager::new(redis_client.clone()).await {
                 Ok(conn) => break conn,
                 Err(e) => {
-                    error!(event="REDIS_ERROR", error=%e, "Redis bağlantı hatası. Tekrar deneniyor...");
+                    // [ARCH-COMPLIANCE FIX] SUTS v4.2: Sadece ilk hata ERROR, sonrakiler DEBUG
+                    if first_error {
+                        error!(event="REDIS_ERROR", error=%e, "Redis bağlantı hatası. Arka planda sessizce denenmeye devam edilecek (Ghost Mode)...");
+                        first_error = false;
+                    } else {
+                        tracing::debug!(event="REDIS_RETRY", error=%e, "Redis bağlantısı bekleniyor...");
+                    }
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }
