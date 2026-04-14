@@ -91,7 +91,7 @@ impl AppConfig {
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "json".to_string()),
-            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.5.8".to_string()),
+            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.6.20".to_string()),
             node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()),
 
             sip_realm: env::var("SIP_SIGNALING_SERVICE_REALM")
